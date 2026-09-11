@@ -12,3 +12,5 @@ htmlcov/
 .filewatch/
 *.log
 AGENTS.md
+node_modules/
+

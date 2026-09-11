@@ -2,6 +2,15 @@
 
 本文件记录面向用户的变更。初始版本 **1.0.0**；小修改每次 +0.0.1；其余情况由用户指定版本。
 
+## 1.1.0 - 2026-09-11
+
+- 新增 `reload`：热更新规则、忽略列表和去抖间隔，不必重启守护进程。
+- 新增 `serve` 本地网页面板（默认 `127.0.0.1`）：按目录列出任务，详情可看事件并编辑规则。
+- 网页支持手动规则与自然语言生成（兼容 OpenAI 的 LLM）；API Key 只写在状态目录 `settings.json`。
+- 新增 `pack.cmd` / `pack.sh` / `pack_skill.py`：构建前端后打出可安装 skill zip（不含 `node_modules`）。
+- 抽出 `service` 层，统一启停、按路径复用实例、以及 `watch.path` / `recursive` 变更时的 `needs_restart`。
+- 前端改为 shadcn + Vite，构建产物随 `filewatch/webui` 分发。
+
 ## 1.0.0 - 2026-09-11
 
 首个正式版本。

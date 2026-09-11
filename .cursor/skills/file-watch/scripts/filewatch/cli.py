@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,19 @@ from filewatch.config import (
     config_to_dict,
     load_config,
     parse_config_dict,
+    summarize_config,
 )
 from filewatch.models import EVENT_TYPES, STREAMS, FileEvent
-from filewatch.paths import sanitize_id, state_root
-from filewatch.process import pid_alive, spawn_detached, terminate_pid
+from filewatch.paths import sanitize_id
+from filewatch.process import pid_alive
 from filewatch.rules import RuleEngine
 from filewatch.runtime import WatchRuntime, new_id, utc_now
+from filewatch.service import (
+    describe_watcher,
+    list_watcher_payloads,
+    start_watch,
+    stop_watch,
+)
 from filewatch.store import WatchStore, list_stores
 
 SAMPLE_CONFIG = """name: inbox
@@ -135,67 +143,8 @@ def cmd_start(ns: argparse.Namespace) -> int:
         config = _load_from_args(ns)
     except ConfigError as exc:
         return fail("bad_config", str(exc), pretty=pretty)
-    watch_id = sanitize_id(ns.id or config.name)
-    watch_path = Path(config.watch.path)
-    if not watch_path.is_dir():
-        return fail(
-            "not_found",
-            f"监听路径不是目录：{watch_path}",
-            pretty=pretty,
-            path=str(watch_path),
-        )
-    store = _store(watch_id)
-    store.ensure()
-    running, pid = _running(store)
-    if running:
-        return emit(
-            {
-                "ok": True,
-                "already_running": True,
-                "watch_id": watch_id,
-                "pid": pid,
-                "path": config.watch.path,
-            },
-            pretty=pretty,
-        )
-    store.config_path.write_text(
-        json.dumps(config_to_dict(config), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    store.clear_stop()
-    env = os.environ.copy()
-    env["FILEWATCH_HOME"] = str(state_root())
-    scripts_dir = Path(__file__).resolve().parent.parent
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(scripts_dir), env.get("PYTHONPATH", "")]))
-    entry = scripts_dir / "filewatch_cli.py"
-    argv = [sys.executable, str(entry), "run", "--id", watch_id]
-    spawned = spawn_detached(argv, store.log_path, env=env)
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        recorded = store.read_pid()
-        if recorded and pid_alive(recorded):
-            return emit(
-                {
-                    "ok": True,
-                    "already_running": False,
-                    "watch_id": watch_id,
-                    "pid": recorded,
-                    "path": config.watch.path,
-                    "home": str(state_root()),
-                },
-                pretty=pretty,
-            )
-        time.sleep(0.1)
-    log_tail = ""
-    if store.log_path.exists():
-        log_tail = store.log_path.read_text(encoding="utf-8")[-2000:]
-    return fail(
-        "start_failed",
-        "守护进程未能就绪",
-        pretty=pretty,
-        spawned_pid=spawned,
-        log=log_tail,
-    )
+    payload = start_watch(config, ns.id)
+    return emit(payload, 0 if payload.get("ok") else 1, pretty=pretty)
 
 
 def cmd_run(ns: argparse.Namespace) -> int:
@@ -222,22 +171,7 @@ def cmd_stop(ns: argparse.Namespace) -> int:
     if err is not None:
         return err
     assert watch_id is not None
-    store = _store(watch_id)
-    running, pid = _running(store)
-    store.request_stop()
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        running, pid = _running(store)
-        if not running:
-            break
-        time.sleep(0.1)
-    if running and pid:
-        terminate_pid(pid)
-        time.sleep(0.2)
-        running, pid = _running(store)
-    if store.pid_path.exists() and not running:
-        store.pid_path.unlink()
-    return emit({"ok": True, "watch_id": watch_id, "running": running, "pid": pid}, pretty=pretty)
+    return emit(stop_watch(watch_id), pretty=pretty)
 
 
 def cmd_status(ns: argparse.Namespace) -> int:
@@ -246,43 +180,11 @@ def cmd_status(ns: argparse.Namespace) -> int:
     if err is not None:
         return err
     assert watch_id is not None
-    store = _store(watch_id)
-    running, pid = _running(store)
-    config = None
-    if store.config_path.exists():
-        raw = json.loads(store.config_path.read_text(encoding="utf-8"))
-        config = parse_config_dict(raw, source=str(store.config_path))
-    return emit(
-        {
-            "ok": True,
-            "watch_id": watch_id,
-            "running": running,
-            "pid": pid,
-            "path": config.watch.path if config else None,
-            "rules": [rule.name for rule in config.rules] if config else [],
-            "pending_events": store.pending_count("events") if store.events_path.exists() else 0,
-            "pending_jobs": store.pending_count("jobs") if store.jobs_path.exists() else 0,
-            "cursors": store.read_cursors() if store.cursors_path.exists() else {},
-            "home": str(store.dir),
-        },
-        pretty=pretty,
-    )
+    return emit({"ok": True, **describe_watcher(_store(watch_id))}, pretty=pretty)
 
 
 def cmd_list(ns: argparse.Namespace) -> int:
-    items = []
-    for store in list_stores():
-        running, pid = _running(store)
-        items.append(
-            {
-                "watch_id": store.watch_id,
-                "running": running,
-                "pid": pid,
-                "pending_events": store.pending_count("events"),
-                "pending_jobs": store.pending_count("jobs"),
-            }
-        )
-    return emit({"ok": True, "watchers": items}, pretty=_pretty(ns))
+    return emit({"ok": True, "watchers": list_watcher_payloads()}, pretty=_pretty(ns))
 
 
 def _read_stream(ns: argparse.Namespace, timeout: float) -> int:
@@ -363,6 +265,111 @@ def cmd_test_rule(ns: argparse.Namespace) -> int:
     )
 
 
+def cmd_validate(ns: argparse.Namespace) -> int:
+    pretty = _pretty(ns)
+    try:
+        config = load_config(ns.config)
+    except ConfigError as exc:
+        return fail("bad_config", str(exc), pretty=pretty)
+    summary = summarize_config(config)
+    watch_path = Path(config.watch.path)
+    warnings: list[str] = []
+    if not watch_path.is_dir():
+        warnings.append(f"监听路径不是目录：{watch_path}")
+    return emit(
+        {
+            "ok": True,
+            "config": str(Path(ns.config).expanduser().resolve()),
+            "watch_id": config.name,
+            "warnings": warnings,
+            **summary,
+        },
+        pretty=pretty,
+    )
+
+
+def cmd_reload(ns: argparse.Namespace) -> int:
+    pretty = _pretty(ns)
+    try:
+        config = load_config(ns.config)
+    except ConfigError as exc:
+        return fail("bad_config", str(exc), pretty=pretty)
+    watch_id, err = _resolve_id(ns.id or config.name, pretty)
+    if err is not None:
+        return err
+    assert watch_id is not None
+    store = _store(watch_id)
+    running, pid = _running(store)
+    if not running:
+        return fail(
+            "not_running",
+            "监听未在运行，请先 start",
+            pretty=pretty,
+            watch_id=watch_id,
+        )
+    generation = uuid.uuid4().hex
+    store.request_reload(config_to_dict(config), generation)
+    timeout = max(float(ns.timeout), 0.5)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = store.read_reload_status()
+        if status and status.get("generation") == generation:
+            if status.get("ok"):
+                return emit(
+                    {
+                        "ok": True,
+                        "watch_id": watch_id,
+                        "pid": pid,
+                        "generation": generation,
+                        "rules": status.get("rules") or [],
+                        "warnings": status.get("warnings") or [],
+                        "applied": status.get("applied") or summarize_config(config),
+                    },
+                    pretty=pretty,
+                )
+            return fail(
+                str(status.get("error") or "reload_failed"),
+                str(status.get("message") or "热更新失败"),
+                pretty=pretty,
+                watch_id=watch_id,
+                generation=generation,
+            )
+        still_running, _ = _running(store)
+        if not still_running:
+            return fail("daemon_exited", "热更新期间守护进程已退出", pretty=pretty, watch_id=watch_id)
+        time.sleep(0.1)
+    return fail(
+        "reload_timeout",
+        "守护进程未在超时内应用配置",
+        pretty=pretty,
+        watch_id=watch_id,
+        generation=generation,
+    )
+
+
+def cmd_serve(ns: argparse.Namespace) -> int:
+    pretty = _pretty(ns)
+    from filewatch.web import create_server
+
+    httpd = create_server(ns.host, int(ns.port))
+    host, port = httpd.server_address[:2]
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{display_host}:{port}/"
+    emit({"ok": True, "url": url, "host": host, "port": port}, pretty=pretty)
+    sys.stdout.flush()
+    if ns.open:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("已停止 Web 服务", file=sys.stderr)
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="filewatch",
@@ -427,6 +434,22 @@ def build_parser() -> argparse.ArgumentParser:
     test_rule.add_argument("--type", choices=EVENT_TYPES, default="created")
     test_rule.add_argument("--is-dir", action="store_true")
     test_rule.set_defaults(func=cmd_test_rule)
+
+    validate = sub.add_parser("validate", help="检查配置和规则语法")
+    validate.add_argument("--config", required=True)
+    validate.set_defaults(func=cmd_validate)
+
+    reload_cmd = sub.add_parser("reload", help="热更新运行中实例的规则，无需重启")
+    reload_cmd.add_argument("--config", required=True)
+    reload_cmd.add_argument("--id")
+    reload_cmd.add_argument("--timeout", type=float, default=8)
+    reload_cmd.set_defaults(func=cmd_reload)
+
+    serve = sub.add_parser("serve", help="打开本地网页，展示指定文件夹的文件变化事件")
+    serve.add_argument("--host", default="127.0.0.1", help="绑定地址，默认 127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765, help="端口，默认 8765")
+    serve.add_argument("--open", action="store_true", help="启动后打开浏览器")
+    serve.set_defaults(func=cmd_serve)
     return parser
 
 

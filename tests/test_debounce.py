@@ -46,6 +46,20 @@ def test_per_path_debounce_flushes_after_quiet_period() -> None:
         debouncer.close()
 
 
+def test_set_delay_ms_shortens_wait() -> None:
+    seen: list[FileEvent] = []
+    debouncer = Debouncer(5000, seen.append)
+    try:
+        debouncer.push(_event("a.txt", "created"))
+        debouncer.set_delay_ms(0)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and not seen:
+            time.sleep(0.02)
+        assert [item.path for item in seen] == ["a.txt"]
+    finally:
+        debouncer.close()
+
+
 def test_delay_zero_flushes_immediately() -> None:
     seen: list[FileEvent] = []
     debouncer = Debouncer(0, seen.append)

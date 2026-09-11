@@ -20,6 +20,21 @@ class WatchStore:
         self.log_path = self.dir / "daemon.log"
         self.stop_path = self.dir / "stop.flag"
         self.config_path = self.dir / "config.json"
+        self.reload_flag_path = self.dir / "reload.flag"
+        self.pending_path = self.dir / "pending.json"
+        self.reload_status_path = self.dir / "reload.status.json"
+
+    def write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+
+    def read_json(self, path: Path) -> dict[str, Any] | None:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
 
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +85,44 @@ class WatchStore:
             if limit is not None and len(records) >= limit:
                 return records, consumed
             return records, consumed
+
+    def read_tail(self, stream: str, limit: int = 200, max_bytes: int = 262144) -> tuple[list[dict[str, Any]], int]:
+        path = self.stream_path(stream)
+        if not path.exists():
+            return [], 0
+        size = path.stat().st_size
+        with path.open("r", encoding="utf-8") as handle:
+            start = max(0, size - max(max_bytes, 1))
+            handle.seek(start)
+            if start > 0:
+                handle.readline()
+            records: list[dict[str, Any]] = []
+            consumed = handle.tell()
+            while True:
+                line = handle.readline()
+                if line == "":
+                    break
+                if not line.endswith("\n"):
+                    break
+                consumed = handle.tell()
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                records.append(json.loads(stripped))
+            if limit is not None and len(records) > limit:
+                records = records[-limit:]
+            return records, consumed
+
+    def record_count(self, stream: str) -> int:
+        path = self.stream_path(stream)
+        if not path.exists():
+            return 0
+        count = 0
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    count += 1
+        return count
 
     def wait(
         self,
@@ -135,6 +188,37 @@ class WatchStore:
 
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
+
+    def request_reload(self, config_dict: dict[str, Any], generation: str) -> None:
+        self.ensure()
+        if self.reload_status_path.exists():
+            self.reload_status_path.unlink()
+        self.write_json(self.pending_path, config_dict)
+        self.write_json(self.reload_flag_path, {"generation": generation})
+
+    def reload_requested(self) -> bool:
+        return self.reload_flag_path.exists()
+
+    def read_pending_config(self) -> tuple[str, dict[str, Any]]:
+        flag = self.read_json(self.reload_flag_path) or {}
+        generation = str(flag.get("generation") or "")
+        pending = self.read_json(self.pending_path)
+        if not generation:
+            raise ValueError("reload 标志缺少 generation")
+        if pending is None:
+            raise ValueError("找不到待应用的配置 pending.json")
+        return generation, pending
+
+    def write_reload_status(self, payload: dict[str, Any]) -> None:
+        self.write_json(self.reload_status_path, payload)
+
+    def read_reload_status(self) -> dict[str, Any] | None:
+        return self.read_json(self.reload_status_path)
+
+    def clear_reload(self) -> None:
+        for path in (self.reload_flag_path, self.pending_path):
+            if path.exists():
+                path.unlink()
 
 
 def list_stores() -> list[WatchStore]:

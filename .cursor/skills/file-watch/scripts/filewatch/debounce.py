@@ -45,6 +45,14 @@ class Debouncer:
         self._thread = threading.Thread(target=self._run, name="filewatch-debounce", daemon=True)
         self._thread.start()
 
+    def set_delay_ms(self, delay_ms: int) -> None:
+        with self._cond:
+            self.delay = max(delay_ms, 0) / 1000.0
+            now = time.monotonic()
+            for item in self._pending.values():
+                item.due = now + self.delay
+            self._cond.notify()
+
     def push(self, event: FileEvent) -> None:
         merged: FileEvent | None = None
         with self._cond:

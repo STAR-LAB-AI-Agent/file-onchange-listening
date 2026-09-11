@@ -17,6 +17,26 @@ def test_append_wait_ack(tmp_path) -> None:
     assert empty == []
 
 
+def test_read_tail_returns_latest(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    for index in range(5):
+        store.append("events", {"id": str(index)})
+    items, cursor = store.read_tail("events", limit=2)
+    assert [item["id"] for item in items] == ["3", "4"]
+    more, _ = store.read_since("events", cursor)
+    assert more == []
+
+
+def test_record_count_skips_blank_lines(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.append("events", {"id": "1"})
+    store.append("events", {"id": "2"})
+    store.events_path.write_text(store.events_path.read_text(encoding="utf-8") + "\n\n", encoding="utf-8")
+    assert store.record_count("events") == 2
+
+
 def test_incomplete_last_line_is_not_consumed(tmp_path) -> None:
     store = WatchStore("demo", root=tmp_path)
     store.ensure()

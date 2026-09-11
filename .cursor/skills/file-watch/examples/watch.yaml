@@ -1,3 +1,4 @@
+# 改规则后：validate --config 本文件，已运行则 reload，未运行则 start。
 name: inbox
 max_parallel_jobs: 1
 watch:

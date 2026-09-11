@@ -58,3 +58,37 @@ def test_cooldown(tmp_path: Path) -> None:
     event = _event(tmp_path)
     assert engine.matches(event)
     assert engine.matches(event) == []
+
+
+def test_replace_rules_drops_removed_cooldown(tmp_path: Path) -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {
+                    "name": "any",
+                    "when": {"types": ["created"], "glob": "**/*", "cooldown_seconds": 60},
+                    "then": [{"notify": {}}],
+                }
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    event = _event(tmp_path)
+    assert engine.matches(event)
+    replacement = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {
+                    "name": "other",
+                    "when": {"types": ["created"], "glob": "**/*"},
+                    "then": [{"notify": {}}],
+                }
+            ],
+        }
+    )
+    engine.replace_rules(replacement.rules)
+    assert [rule.name for rule in engine.matches(event)] == ["other"]

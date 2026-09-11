@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "filewatch-agent"
-version = "1.0.0"
+version = "1.1.0"
 description = "按规则发送通知或启动智能体任务的目录监听工具"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,9 @@ filewatch = "filewatch.cli:main"
 
 [tool.setuptools.packages.find]
 where = [".cursor/skills/file-watch/scripts"]
+
+[tool.setuptools.package-data]
+filewatch = ["webui/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

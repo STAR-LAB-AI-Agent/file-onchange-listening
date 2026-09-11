@@ -23,7 +23,7 @@ from watchdog.events import (
 from watchdog.observers import Observer
 
 from filewatch.actions import ActionRunner
-from filewatch.config import config_to_dict
+from filewatch.config import ConfigError, config_to_dict, parse_config_dict, summarize_config
 from filewatch.debounce import Debouncer
 from filewatch.matching import path_is_ignored
 from filewatch.models import EVENT_TYPES, Config, FileEvent
@@ -31,6 +31,13 @@ from filewatch.rules import RuleEngine
 from filewatch.store import WatchStore
 
 log = logging.getLogger("filewatch")
+
+
+class ReloadError(Exception):
+    def __init__(self, error: str, message: str) -> None:
+        super().__init__(message)
+        self.error = error
+        self.message = message
 
 # Drop dir-modified / open / close at the emitter. Windows ReadDirectoryChangesW
 # emits DirModifiedEvent constantly; Linux inotify adds opened/closed.
@@ -73,12 +80,14 @@ class WatchRuntime:
         self.observer = Observer()
         self._ignore_case = sys.platform == "win32"
         self._stop = threading.Event()
+        self._config_lock = threading.Lock()
 
     def start(self) -> None:
         if not self.root.exists() or not self.root.is_dir():
             raise FileNotFoundError(f"watch path is not a directory: {self.root}")
         self.store.ensure()
         self.store.clear_stop()
+        self.store.clear_reload()
         self.store.config_path.write_text(
             json.dumps(config_to_dict(self.config), ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -112,12 +121,104 @@ class WatchRuntime:
         self.start()
         try:
             while not self._stop.is_set():
-                if self.store.stop_requested():
+                if not self._poll_control():
                     log.info("stop flag detected")
                     break
                 time.sleep(poll)
         finally:
             self.stop()
+
+    def _poll_control(self) -> bool:
+        if self.store.stop_requested():
+            return False
+        if self.store.reload_requested():
+            self._handle_reload()
+        return True
+
+    def apply_reload(self, config: Config) -> dict:
+        new_root = Path(config.watch.path).resolve()
+        if new_root != self.root:
+            raise ReloadError("needs_restart", "监听路径变更需要重启，无法热更新")
+        if bool(config.watch.recursive) != bool(self.config.watch.recursive):
+            raise ReloadError("needs_restart", "recursive 变更需要重启，无法热更新")
+        warnings: list[str] = []
+        with self._config_lock:
+            old_parallel = self.config.max_parallel_jobs
+            self.engine.replace_rules(config.rules)
+            self.debouncer.set_delay_ms(config.watch.debounce_ms)
+            self.config = Config(
+                name=self.config.name,
+                watch=config.watch,
+                rules=config.rules,
+                max_parallel_jobs=old_parallel,
+                source=config.source,
+            )
+        if config.max_parallel_jobs != old_parallel:
+            warnings.append("max_parallel_jobs 未热更新，需重启后生效")
+        summary = summarize_config(self.config)
+        summary["warnings"] = warnings
+        return summary
+
+    def _handle_reload(self) -> None:
+        generation = ""
+        try:
+            generation, pending = self.store.read_pending_config()
+            config = parse_config_dict(pending, source=pending.get("source"))
+            config = Config(
+                name=self.config.name,
+                watch=config.watch,
+                rules=config.rules,
+                max_parallel_jobs=config.max_parallel_jobs,
+                source=config.source,
+            )
+            result = self.apply_reload(config)
+            self.store.config_path.write_text(
+                json.dumps(config_to_dict(self.config), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.store.write_reload_status(
+                {
+                    "ok": True,
+                    "generation": generation,
+                    "watch_id": self.store.watch_id,
+                    "rules": [rule["name"] for rule in result["rules"]],
+                    "warnings": result["warnings"],
+                    "applied": result,
+                }
+            )
+            log.info("reloaded rules=%s", [rule["name"] for rule in result["rules"]])
+        except ReloadError as exc:
+            self.store.write_reload_status(
+                {
+                    "ok": False,
+                    "generation": generation,
+                    "error": exc.error,
+                    "message": exc.message,
+                }
+            )
+            log.warning("reload rejected: %s", exc.message)
+        except (ConfigError, ValueError, FileNotFoundError) as exc:
+            self.store.write_reload_status(
+                {
+                    "ok": False,
+                    "generation": generation,
+                    "error": "bad_config",
+                    "message": str(exc),
+                }
+            )
+            log.warning("reload failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            self.store.write_reload_status(
+                {
+                    "ok": False,
+                    "generation": generation,
+                    "error": "reload_failed",
+                    "message": str(exc),
+                }
+            )
+            log.exception("reload failed")
+        finally:
+            self.store.clear_reload()
 
     def _is_state_path(self, path: Path) -> bool:
         try:
@@ -146,7 +247,9 @@ class WatchRuntime:
             old = Path(src) if src else None
             if old is not None and self._is_state_path(old):
                 return
-        if path_is_ignored(self.root, path, self.config.watch.ignore, ignore_case=self._ignore_case):
+        with self._config_lock:
+            ignore = self.config.watch.ignore
+        if path_is_ignored(self.root, path, ignore, ignore_case=self._ignore_case):
             return
         old_path = src if event_type == "moved" and src and src != path_str else None
         event = FileEvent(
@@ -163,7 +266,9 @@ class WatchRuntime:
     def _on_coalesced(self, event: FileEvent) -> None:
         self.store.append("events", event.to_dict())
         log.info("event %s %s", event.type, event.path)
-        for rule in self.engine.matches(event):
+        with self._config_lock:
+            hits = self.engine.matches(event)
+        for rule in hits:
             log.info("rule hit %s -> %s", rule.name, event.path)
             self.actions.submit(event, rule)
 

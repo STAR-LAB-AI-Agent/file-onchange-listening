@@ -18,6 +18,11 @@ class RuleEngine:
         self._last_hit: dict[tuple[str, str], float] = {}
         self._ignore_case = sys.platform == "win32"
 
+    def replace_rules(self, rules: tuple[Rule, ...]) -> None:
+        names = {rule.name for rule in rules}
+        self.rules = rules
+        self._last_hit = {key: ts for key, ts in self._last_hit.items() if key[0] in names}
+
     def matches(self, event: FileEvent) -> list[Rule]:
         rel = relative_posix(self.root, Path(event.path))
         if rel is None:
