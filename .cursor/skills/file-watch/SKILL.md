@@ -8,7 +8,7 @@ description: >-
 
 # 文件监听
 
-版本 **1.1.0**。
+版本 **1.1.3**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 

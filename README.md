@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **1.1.0**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **1.1.3**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -52,6 +52,43 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 所有命令在 stdout 输出 JSON。状态目录默认是 `%LOCALAPPDATA%/filewatch`（可用 `FILEWATCH_HOME` 或 `--home` 覆盖），不要放进被监听的文件夹。
 
 调用协议见 [`.cursor/skills/file-watch/SKILL.md`](.cursor/skills/file-watch/SKILL.md)。
+
+## Skill 推荐工作流
+
+也可以在 Web 端完成同样的事：让 Agent 打开本机面板后，自己在首页加目录、在任务详情里改规则。更省事的做法是直接对 Agent 说话，由它调用本 skill。下面是建议发给 Agent 的提示词，以及对应效果。
+
+### 1. 启动监控进程和 Web 端
+
+可以这样说：
+
+- 「用 file-watch 把监听跑起来，并打开事件网页。」
+- 「先打开 filewatch 面板，目录我待会再定。」
+- 「监听已经在跑的话不要重复启动，把网页地址给我。」
+
+效果：后台开始听文件变化（已有任务会复用）；本机网页打开或给出地址，可在浏览器里看任务和事件。只要面板时，可以先不起具体目录。关掉网页不会停掉已经在听的目录。
+
+### 2. 设置要监控的目录
+
+可以这样说：
+
+- 「开始监听 `D:/data/inbox`，含子目录。」
+- 「看一下现在在听哪些文件夹，有 `D:/data/inbox` 就复用，没有再加。」
+- 「把监听目录改成 `D:/work/docs`，不要再听原来的 inbox。」
+
+效果：该路径成为一条监听任务；同一路径不会开两个进程。只换规则不必重启；你明确要求换目录或是否递归时，会先停再启后再生效。
+
+### 3. 新增监控规则
+
+把「哪些文件、什么变化、然后做什么」说清楚即可，例如：
+
+- 「inbox 里新建或改了 markdown，通知我文件名和路径。」
+- 「`D:/data/inbox` 下出现新的 `*.pdf` 时告诉我，先不要启动别的智能体。」
+- 「docs 里 markdown 有改动就启动智能体做摘要，半分钟内同一文件只触发一次。」
+- 「再加一条：删除 `.tmp` 以外的文件也通知我；原来的 markdown 规则留着。」
+
+效果：口语被写成规则并校验；监听已在跑则热更新，没跑则启动。Agent 会回报已生效的规则名。没提智能体时默认只发通知。没说要换目录时，原来的监听路径和是否递归保持不变。之后文件对上规则，就会进任务邮箱（或按你的要求拉起智能体）。
+
+调用细节见 [`.cursor/skills/file-watch/SKILL.md`](.cursor/skills/file-watch/SKILL.md)。
 
 ## 规则示例
 
