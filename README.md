@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **1.1.3**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **1.1.4**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
