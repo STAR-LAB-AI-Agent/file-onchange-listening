@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "filewatch-agent"
+version = "1.0.0"
+description = "按规则发送通知或启动智能体任务的目录监听工具"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "watchdog>=4.0",
+  "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+agent = ["cursor-sdk"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+filewatch = "filewatch.cli:main"
+
+[tool.setuptools.packages.find]
+where = [".cursor/skills/file-watch/scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".cursor/skills/file-watch/scripts"]

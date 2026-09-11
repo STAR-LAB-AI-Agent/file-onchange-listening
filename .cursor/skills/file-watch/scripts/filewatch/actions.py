@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from urllib.request import Request, urlopen
+
+from filewatch.models import AgentAction, FileEvent, NotifyAction, Rule
+from filewatch.store import WatchStore
+from filewatch.templates import render, render_argv
+
+
+class ActionRunner:
+    def __init__(self, store: WatchStore, max_workers: int = 1) -> None:
+        self.store = store
+        self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="filewatch-job")
+
+    def submit(self, event: FileEvent, rule: Rule) -> None:
+        for index, action in enumerate(rule.then):
+            self._pool.submit(self._run_one, event, rule, action, index)
+
+    def _run_one(self, event: FileEvent, rule: Rule, action: NotifyAction | AgentAction, index: int) -> None:
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
+        record: dict[str, Any] = {
+            "id": job_id,
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "watch_id": event.watch_id,
+            "rule": rule.name,
+            "action_index": index,
+            "event": event.to_dict(),
+            "status": "running",
+        }
+        if isinstance(action, NotifyAction):
+            record["kind"] = "notify"
+            record.update(self._notify(action, event, rule))
+        else:
+            record["kind"] = "agent"
+            record.update(self._agent(action, event, rule))
+        self.store.append("jobs", record)
+
+    def _notify(self, action: NotifyAction, event: FileEvent, rule: Rule) -> dict[str, Any]:
+        extra = {"rule": rule.name, "title": action.title}
+        title = render(action.title, event, extra)
+        message = render(action.message, event, extra)
+        result: dict[str, Any] = {
+            "title": title,
+            "message": message,
+            "status": "ok",
+        }
+        errors: list[str] = []
+        if action.webhook:
+            payload = {
+                "title": title,
+                "message": message,
+                "rule": rule.name,
+                "event": event.to_dict(),
+            }
+            try:
+                self._post_webhook(action.webhook, payload)
+                result["webhook"] = "ok"
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"webhook: {exc}")
+                result["webhook"] = "error"
+        if errors:
+            result["status"] = "error"
+            result["error"] = "; ".join(errors)
+        return result
+
+    def _post_webhook(self, url: str, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with urlopen(request, timeout=15) as response:
+            response.read()
+
+    def _agent(self, action: AgentAction, event: FileEvent, rule: Rule) -> dict[str, Any]:
+        extra = {"rule": rule.name}
+        prompt = render(action.prompt, event, extra)
+        cwd = render(action.cwd, event, extra) if action.cwd else None
+        try:
+            if action.runner == "cursor_sdk":
+                output = self._run_cursor_sdk(prompt, cwd, action)
+            else:
+                output = self._run_command(action, event, extra, prompt, cwd)
+            return {"status": "ok", "prompt": prompt, "output": output[-4000:]}
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "prompt": prompt, "error": str(exc)}
+
+    def _run_command(
+        self,
+        action: AgentAction,
+        event: FileEvent,
+        extra: dict[str, Any],
+        prompt: str,
+        cwd: str | None,
+    ) -> str:
+        if not action.command:
+            raise RuntimeError("agent.command is required")
+        argv = render_argv(action.command, event, extra)
+        env = os.environ.copy()
+        env["FILEWATCH_PROMPT"] = prompt
+        env["FILEWATCH_EVENT_JSON"] = json.dumps(event.to_dict(), ensure_ascii=False)
+        env["FILEWATCH_RULE"] = str(extra.get("rule", ""))
+        completed = subprocess.run(
+            argv,
+            input=prompt,
+            cwd=cwd or None,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=action.timeout_seconds,
+            check=False,
+        )
+        output = (completed.stdout or "") + (completed.stderr or "")
+        if completed.returncode != 0:
+            raise RuntimeError(f"agent command exited {completed.returncode}: {output[-2000:]}")
+        return output
+
+    def _run_cursor_sdk(self, prompt: str, cwd: str | None, action: AgentAction) -> str:
+        try:
+            from cursor_sdk import Agent, AgentOptions, LocalAgentOptions
+        except ImportError as exc:
+            raise RuntimeError("cursor-sdk is not installed; pip install cursor-sdk") from exc
+        options = AgentOptions(
+            api_key=os.environ.get("CURSOR_API_KEY"),
+            model=action.model or "composer-2.5",
+            local=LocalAgentOptions(cwd=cwd or os.getcwd()),
+        )
+        result = Agent.prompt(prompt, options)
+        status = getattr(result, "status", None)
+        text = getattr(result, "result", None) or getattr(result, "text", None) or str(result)
+        if status and str(status) not in {"finished", "ok", "success"}:
+            raise RuntimeError(f"cursor agent status={status}: {text}")
+        return str(text)
+
+    def close(self, wait: bool = False) -> None:
+        self._pool.shutdown(wait=wait, cancel_futures=not wait)

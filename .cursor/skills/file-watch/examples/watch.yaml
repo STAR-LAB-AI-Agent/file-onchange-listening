@@ -1,0 +1,40 @@
+name: inbox
+max_parallel_jobs: 1
+watch:
+  path: ./inbox
+  recursive: true
+  debounce_ms: 400
+  ignore:
+    - "**/.git/**"
+    - "**/__pycache__/**"
+    - "**/.venv/**"
+    - "**/*.tmp"
+rules:
+  - name: any-file-change
+    when:
+      types: [created, modified]
+      glob: "**/*"
+      is_dir: false
+    then:
+      - notify:
+          title: "文件有变化"
+          message: "{{type}}: {{path}}"
+          mailbox: true
+  # 取消注释后，新建 markdown 时会启动智能体。
+  # - name: summarize-markdown
+  #   when:
+  #     types: [created]
+  #     glob: "**/*.md"
+  #     cooldown_seconds: 30
+  #   then:
+  #     - notify:
+  #         title: "新建 markdown"
+  #         message: "{{filename}} 已创建"
+  #     - agent:
+  #         runner: command
+  #         command: ["python", "scripts/echo_agent.py"]
+  #         prompt: |
+  #           新建文件：{{path}}
+  #           事件：{{type}}
+  #           请处理该文件。
+  #         timeout_seconds: 600
