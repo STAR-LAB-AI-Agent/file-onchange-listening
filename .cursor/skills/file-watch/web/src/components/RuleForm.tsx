@@ -49,10 +49,11 @@ export function RuleForm({
   const [mailbox, setMailbox] = useState(notify0?.mailbox !== false)
   const [dingWebhook, setDingWebhook] = useState(notify0?.dingtalk?.webhook || "")
   const [dingSecret, setDingSecret] = useState(notify0?.dingtalk?.secret || "")
-  const [useAgent, setUseAgent] = useState(!!agent0)
-  const [runner, setRunner] = useState(agent0?.runner || "command")
-  const [command, setCommand] = useState((agent0?.command || []).join(" "))
-  const [prompt, setPrompt] = useState(agent0?.prompt || "文件事件 {{type}}：{{path}}\n请处理该文件。")
+  const [taskPrompt, setTaskPrompt] = useState(() => {
+    if (!agent0) return ""
+    if (agent0.runner === "command" || agent0.runner === "cursor_sdk") return ""
+    return agent0.prompt || ""
+  })
 
   const canSubmit = useMemo(() => types.length > 0, [types])
 
@@ -74,14 +75,15 @@ export function RuleForm({
         },
       },
     ]
-    if (useAgent) {
-      const argv = command.trim() ? command.trim().split(/\s+/) : null
+    const task = taskPrompt.trim()
+    if (task) {
       then.push({
         agent: {
-          runner: runner === "cursor_sdk" ? "cursor_sdk" : "command",
-          prompt,
-          command: runner === "command" ? argv : argv,
+          runner: "builtin",
+          prompt: task,
+          command: null,
           timeout_seconds: 600,
+          max_steps: 24,
         },
       })
     }
@@ -91,110 +93,116 @@ export function RuleForm({
       enabled,
       when: {
         types,
-        glob: globList,
+        glob: globList.length ? globList : ["**/*"],
         regex: regex.trim() || null,
-        is_dir: isDir === "any" ? null : isDir === "dir",
-        min_size_bytes: minSize.trim() ? Number(minSize) : null,
+        is_dir: isDir === "dir" ? true : isDir === "file" ? false : null,
         cooldown_seconds: Number(cooldown) || 0,
+        min_size_bytes: minSize.trim() ? Number(minSize) : null,
       },
       then,
     })
   }
 
   return (
-    <div className="grid max-h-[70vh] gap-4 overflow-y-auto pr-1">
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
-        <div className="grid gap-1.5">
-          <Label htmlFor="rule-name">规则名</Label>
-          <Input id="rule-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="new-markdown" />
-        </div>
-        <label className="flex items-center gap-2 text-sm">
-          <Switch checked={enabled} onCheckedChange={setEnabled} />
-          启用
-        </label>
+    <div className="grid gap-4">
+      <div className="grid gap-1.5">
+        <Label htmlFor="rule-name">规则名</Label>
+        <Input id="rule-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="new-markdown" />
       </div>
+      <label className="flex items-center gap-2 text-sm">
+        <Switch checked={enabled} onCheckedChange={setEnabled} />
+        启用
+      </label>
 
       <div className="grid gap-1.5">
         <Label>事件类型</Label>
-        <div className="flex flex-wrap gap-3">
+        <ToggleGroup
+          type="multiple"
+          variant="outline"
+          size="sm"
+          value={types}
+          onValueChange={(value) => {
+            if (value.length) setTypes(value)
+          }}
+          className="flex flex-wrap justify-start"
+        >
           {TYPE_IDS.map((id) => (
-            <label key={id} className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={types.includes(id)}
-                onCheckedChange={(checked) => {
-                  setTypes((prev) => {
-                    if (checked) return TYPE_IDS.filter((item) => item === id || prev.includes(item))
-                    return prev.filter((item) => item !== id)
-                  })
-                }}
-              />
-              {TYPE_LABEL[id]}
-            </label>
+            <ToggleGroupItem key={id} value={id}>
+              {TYPE_LABEL[id] || id}
+            </ToggleGroupItem>
           ))}
-        </div>
+        </ToggleGroup>
       </div>
 
       <div className="grid gap-1.5">
-        <Label htmlFor="rule-glob">glob（逗号分隔，递归用 **/*.md）</Label>
+        <Label htmlFor="rule-glob">Glob（逗号分隔，递归用 **/*.md）</Label>
         <Input
           id="rule-glob"
           value={glob}
           onChange={(event) => setGlob(event.target.value)}
-          placeholder="**/*.md, **/*.txt"
+          placeholder="**/*.md"
           className="font-mono"
         />
       </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="rule-regex">正则（可选）</Label>
+        <Input id="rule-regex" value={regex} onChange={(event) => setRegex(event.target.value)} className="font-mono" />
+      </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-1.5">
-          <Label>匹配对象</Label>
-          <ToggleGroup type="single" variant="outline" size="sm" value={isDir} onValueChange={(value) => value && setIsDir(value)}>
+          <Label>路径类型</Label>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            value={isDir}
+            onValueChange={(value) => {
+              if (value) setIsDir(value)
+            }}
+          >
+            <ToggleGroupItem value="any">任意</ToggleGroupItem>
             <ToggleGroupItem value="file">文件</ToggleGroupItem>
             <ToggleGroupItem value="dir">目录</ToggleGroupItem>
-            <ToggleGroupItem value="any">不限</ToggleGroupItem>
           </ToggleGroup>
         </div>
         <div className="grid gap-1.5">
           <Label htmlFor="rule-cooldown">冷却（秒）</Label>
           <Input id="rule-cooldown" type="number" min={0} value={cooldown} onChange={(event) => setCooldown(event.target.value)} />
         </div>
-        <div className="grid gap-1.5">
-          <Label htmlFor="rule-size">最小字节（可选）</Label>
-          <Input id="rule-size" type="number" min={0} value={minSize} onChange={(event) => setMinSize(event.target.value)} />
-        </div>
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="rule-minsize">最小字节（可选）</Label>
+        <Input id="rule-minsize" type="number" min={0} value={minSize} onChange={(event) => setMinSize(event.target.value)} />
       </div>
 
       <div className="grid gap-1.5">
-        <Label htmlFor="rule-regex">正则（可选）</Label>
-        <Input id="rule-regex" value={regex} onChange={(event) => setRegex(event.target.value)} className="font-mono" />
-      </div>
-
-      <div className="grid gap-3 sm:grid-cols-2">
-        <div className="grid gap-1.5">
-          <Label htmlFor="rule-title">通知标题</Label>
-          <Input id="rule-title" value={title} onChange={(event) => setTitle(event.target.value)} />
-        </div>
-        <div className="grid gap-1.5">
-          <Label htmlFor="rule-webhook">自定义 Webhook（可选，立即 POST）</Label>
-          <Input id="rule-webhook" value={webhook} onChange={(event) => setWebhook(event.target.value)} placeholder="https://" />
-        </div>
+        <Label htmlFor="rule-title">通知标题</Label>
+        <Input id="rule-title" value={title} onChange={(event) => setTitle(event.target.value)} />
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="rule-message">通知内容</Label>
-        <Input id="rule-message" value={message} onChange={(event) => setMessage(event.target.value)} className="font-mono" />
+        <Textarea id="rule-message" value={message} onChange={(event) => setMessage(event.target.value)} rows={2} />
+      </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor="rule-webhook">Webhook（可选，立即 POST）</Label>
+        <Input
+          id="rule-webhook"
+          value={webhook}
+          onChange={(event) => setWebhook(event.target.value)}
+          placeholder="https://"
+          className="font-mono"
+        />
       </div>
       <div className="grid gap-3 rounded-lg border p-3">
-        <div className="space-y-1">
-          <Label>钉钉群机器人（可选）</Label>
-          <p className="text-xs text-muted-foreground">命中后每分钟汇总推送一次，没有新变化则不发送。Webhook 与 SEC 加签填在群机器人设置里。</p>
-        </div>
+        <div className="text-sm font-medium">钉钉群（可选，按分钟汇总）</div>
         <div className="grid gap-1.5">
           <Label htmlFor="rule-ding-webhook">钉钉 Webhook</Label>
           <Input
             id="rule-ding-webhook"
             value={dingWebhook}
             onChange={(event) => setDingWebhook(event.target.value)}
-            placeholder="https://oapi.dingtalk.com/robot/send?access_token="
+            placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
             className="font-mono"
           />
         </div>
@@ -216,34 +224,21 @@ export function RuleForm({
         写入 jobs 邮箱
       </label>
 
-      <label className="flex items-center gap-2 text-sm">
-        <Checkbox checked={useAgent} onCheckedChange={(checked) => setUseAgent(!!checked)} />
-        同时启动智能体
-      </label>
-      {useAgent ? (
-        <div className="grid gap-3 rounded-lg border p-3">
-          <ToggleGroup type="single" variant="outline" size="sm" value={runner} onValueChange={(value) => {
-            if (value === "command" || value === "cursor_sdk") setRunner(value)
-          }}>
-            <ToggleGroupItem value="command">command</ToggleGroupItem>
-            <ToggleGroupItem value="cursor_sdk">cursor_sdk</ToggleGroupItem>
-          </ToggleGroup>
-          <div className="grid gap-1.5">
-            <Label htmlFor="rule-command">命令（空格分隔 argv）</Label>
-            <Input
-              id="rule-command"
-              value={command}
-              onChange={(event) => setCommand(event.target.value)}
-              placeholder="python scripts/echo_agent.py"
-              className="font-mono"
-            />
-          </div>
-          <div className="grid gap-1.5">
-            <Label htmlFor="rule-prompt">Prompt</Label>
-            <Textarea id="rule-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={3} />
-          </div>
-        </div>
-      ) : null}
+      <div className="grid gap-1.5">
+        <Label htmlFor="rule-task">任务要求（可选）</Label>
+        <Textarea
+          id="rule-task"
+          value={taskPrompt}
+          onChange={(event) => setTaskPrompt(event.target.value)}
+          rows={4}
+          placeholder={
+            "填写后，规则命中时会启动内置智能体（调用设置页 LLM）。\n例如：对 docs 下所有 .md 按参考格式重写。本次触发：{{type}} {{path}}"
+          }
+        />
+        <p className="text-xs text-muted-foreground">
+          留空则只监听/通知；非空则 runner=builtin，可用 {"{{path}}"} {"{{filename}}"} {"{{type}}"} 等模板变量。
+        </p>
+      </div>
 
       <div className="flex justify-end gap-2">
         <Button variant="outline" type="button" onClick={onCancel}>

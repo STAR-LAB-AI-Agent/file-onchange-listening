@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 EVENT_TYPES = ("created", "modified", "deleted", "moved")
 STREAMS = ("events", "jobs")
-AGENT_RUNNERS = ("command", "cursor_sdk")
+AGENT_RUNNERS = ("command", "cursor_sdk", "builtin")
 
 
 @dataclass(frozen=True)
@@ -70,12 +70,13 @@ class NotifyAction:
 
 @dataclass(frozen=True)
 class AgentAction:
-    runner: Literal["command", "cursor_sdk"] = "command"
+    runner: Literal["command", "cursor_sdk", "builtin"] = "builtin"
     prompt: str = "File {{type}}: {{path}}"
     command: tuple[str, ...] | None = None
     cwd: str | None = None
     timeout_seconds: float = 600.0
     model: str | None = None
+    max_steps: int = 24
 
 
 Action = NotifyAction | AgentAction

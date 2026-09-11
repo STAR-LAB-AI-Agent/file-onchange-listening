@@ -26,21 +26,31 @@ rules:
           #   webhook: "https://oapi.dingtalk.com/robot/send?access_token=TOKEN"
           #   secret: "SECxxx"
           #   interval_seconds: 60
-  # 取消注释后，新建 markdown 时会启动智能体。
-  # - name: summarize-markdown
+  # 取消注释后，docs 下 markdown 变化时启动内置智能体（调用设置页 LLM）。
+  # - name: rewrite-docs-md
+  #   when:
+  #     types: [created, modified]
+  #     glob: "docs/**/*.md"
+  #     cooldown_seconds: 60
+  #   then:
+  #     - notify:
+  #         title: "docs markdown 有变化"
+  #         message: "{{type}}: {{path}}"
+  #     - agent:
+  #         runner: builtin
+  #         prompt: |
+  #           工作区是监听根目录。对 docs 下所有 .md 按参考格式重写。
+  #           本次触发：{{type}} {{path}}
+  #         timeout_seconds: 600
+  #         max_steps: 24
+  # 高级：外部 command / cursor_sdk
+  # - name: echo-agent
   #   when:
   #     types: [created]
   #     glob: "**/*.md"
-  #     cooldown_seconds: 30
   #   then:
-  #     - notify:
-  #         title: "新建 markdown"
-  #         message: "{{filename}} 已创建"
   #     - agent:
   #         runner: command
   #         command: ["python", "scripts/echo_agent.py"]
-  #         prompt: |
-  #           新建文件：{{path}}
-  #           事件：{{type}}
-  #           请处理该文件。
+  #         prompt: "新建文件：{{path}}"
   #         timeout_seconds: 600

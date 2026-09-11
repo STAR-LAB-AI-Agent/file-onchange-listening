@@ -8,7 +8,7 @@ description: >-
 
 # 文件监听
 
-版本 **1.1.4**。
+版本 **2.0.0**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 
@@ -56,7 +56,9 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 - `when.types` 只能是 `created` / `modified` / `deleted` / `moved`。
 - `then` 每项只能是 `notify` 或 `agent` 之一。
 - 模板变量只能用 `{{path}}` `{{filename}}` `{{type}}` `{{watch_id}}` `{{ts}}` `{{old_path}}` `{{json}}` `{{rule}}`。
-- 用户没说启动智能体时，默认只写 `notify`（写入 jobs 邮箱）。
+- 用户没说启动智能体/任务要求时，默认只写 `notify`（写入 jobs 邮箱）。
+- 用户要按文件变化执行任务时，写 `agent.runner: builtin`，把任务要求放进 `prompt`；会调用设置页 LLM，带 Read/Glob/Grep/Write/Bash/PowerShell 工具循环。
+- 高级用法仍可用 `command` / `cursor_sdk`。
 - 用户要推到钉钉群时，在 `notify.dingtalk` 填写 `webhook` 和 `secret`（SEC 加签）。命中后每分钟汇总一次，不要写成即时 webhook。
 - 热更新时保留原来的 `watch.path` / `recursive`，除非用户明确要改监听目录。
 
@@ -133,7 +135,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 在本机打开任务面板。首页按监听目录列出任务；详情分「文件变化」和「监听规则」：
 
 - 文件变化：该目录的新建 / 修改 / 删除 / 移动
-- 监听规则：手动添加，或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
+- 监听规则：手动添加（任务要求非空即 builtin 智能体），或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
 - 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key。Key 写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`
 
 用户要打开面板时：
@@ -177,12 +179,12 @@ rules:
             secret: "SECxxx"
             interval_seconds: 60
       - agent:
-          runner: command
-          command: ["python", "scripts/echo_agent.py"]
+          runner: builtin
           prompt: |
-            文件事件 {{type}}：{{path}}
-            请处理该文件。
+            工作区是监听根目录。对 docs 下所有 .md 按参考格式重写。
+            本次触发：{{type}} {{path}}
           timeout_seconds: 600
+          max_steps: 24
 ```
 
 `when` 字段：`types`、`glob`（字符串或列表）、`regex`、`is_dir`、`min_size_bytes`、`cooldown_seconds`。
@@ -190,8 +192,11 @@ rules:
 `then` 动作：
 
 - `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON。可选 `dingtalk` 把命中事件按分钟汇总推到钉钉群（Webhook + SEC 加签；无变化不发送）。
+- `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工具日志在 `home/agent-logs/<job_id>.jsonl`。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。
 - `agent.runner: command`：执行 argv。prompt 走 stdin，同时设置 `FILEWATCH_PROMPT` 和 `FILEWATCH_EVENT_JSON`。
 - `agent.runner: cursor_sdk`：需要 `cursor-sdk` 和 `CURSOR_API_KEY`。会启动**一次新的**智能体 run，不会唤醒当前对话。
+
+`runner` 缺省：有 `prompt` 且无 `command` → `builtin`；有 `command` → `command`。网页「任务要求」非空即提交 `builtin`。
 
 模板变量：`{{path}}`、`{{filename}}`、`{{type}}`、`{{watch_id}}`、`{{ts}}`、`{{old_path}}`、`{{json}}`、`{{rule}}`。
 

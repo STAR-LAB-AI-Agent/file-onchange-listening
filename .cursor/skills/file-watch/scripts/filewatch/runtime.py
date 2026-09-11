@@ -75,12 +75,19 @@ class WatchRuntime:
         self.store = store
         self.root = Path(config.watch.path).resolve()
         self.engine = RuleEngine(self.root, config.rules)
-        self.actions = ActionRunner(store, max_workers=config.max_parallel_jobs)
+        self.actions = ActionRunner(
+            store,
+            max_workers=config.max_parallel_jobs,
+            workspace=self.root,
+            suppress=self.suppress_path,
+        )
         self.debouncer = Debouncer(config.watch.debounce_ms, self._on_coalesced)
         self.observer = Observer()
         self._ignore_case = sys.platform == "win32"
         self._stop = threading.Event()
         self._config_lock = threading.Lock()
+        self._suppress_until: dict[str, float] = {}
+        self._suppress_lock = threading.Lock()
 
     def start(self) -> None:
         if not self.root.exists() or not self.root.is_dir():
@@ -220,6 +227,33 @@ class WatchRuntime:
         finally:
             self.store.clear_reload()
 
+    def suppress_path(self, path: str, ttl: float = 2.0) -> None:
+        """Ignore filesystem events for path until now+ttl (Agent Write self-trigger)."""
+        try:
+            key = str(Path(path).resolve())
+        except OSError:
+            key = str(path)
+        until = time.monotonic() + max(0.1, float(ttl))
+        with self._suppress_lock:
+            prev = self._suppress_until.get(key, 0.0)
+            if until > prev:
+                self._suppress_until[key] = until
+
+    def _is_suppressed(self, path: Path) -> bool:
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        now = time.monotonic()
+        with self._suppress_lock:
+            until = self._suppress_until.get(key)
+            if until is None:
+                return False
+            if until <= now:
+                del self._suppress_until[key]
+                return False
+            return True
+
     def _is_state_path(self, path: Path) -> bool:
         try:
             resolved = path.resolve()
@@ -243,9 +277,13 @@ class WatchRuntime:
         path = Path(path_str)
         if self._is_state_path(path):
             return
+        if self._is_suppressed(path):
+            return
         if dest:
             old = Path(src) if src else None
             if old is not None and self._is_state_path(old):
+                return
+            if old is not None and self._is_suppressed(old):
                 return
         with self._config_lock:
             ignore = self.config.watch.ignore

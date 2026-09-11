@@ -6,7 +6,9 @@ import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -17,8 +19,17 @@ from filewatch.templates import render, render_argv
 
 
 class ActionRunner:
-    def __init__(self, store: WatchStore, max_workers: int = 1) -> None:
+    def __init__(
+        self,
+        store: WatchStore,
+        max_workers: int = 1,
+        *,
+        workspace: Path | None = None,
+        suppress: Callable[[str, float], None] | None = None,
+    ) -> None:
         self.store = store
+        self.workspace = workspace
+        self.suppress = suppress
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="filewatch-job")
         self._dingtalk: DingTalkBatcher | None = None
         self._dingtalk_lock = threading.Lock()
@@ -43,7 +54,7 @@ class ActionRunner:
             record.update(self._notify(action, event, rule))
         else:
             record["kind"] = "agent"
-            record.update(self._agent(action, event, rule))
+            record.update(self._agent(action, event, rule, job_id))
         self.store.append("jobs", record)
 
     def _notify(self, action: NotifyAction, event: FileEvent, rule: Rule) -> dict[str, Any]:
@@ -101,18 +112,80 @@ class ActionRunner:
         with urlopen(request, timeout=15) as response:
             response.read()
 
-    def _agent(self, action: AgentAction, event: FileEvent, rule: Rule) -> dict[str, Any]:
+    def _agent(
+        self,
+        action: AgentAction,
+        event: FileEvent,
+        rule: Rule,
+        job_id: str,
+    ) -> dict[str, Any]:
         extra = {"rule": rule.name}
         prompt = render(action.prompt, event, extra)
         cwd = render(action.cwd, event, extra) if action.cwd else None
         try:
             if action.runner == "cursor_sdk":
                 output = self._run_cursor_sdk(prompt, cwd, action)
-            else:
-                output = self._run_command(action, event, extra, prompt, cwd)
-            return {"status": "ok", "prompt": prompt, "output": output[-4000:]}
+                return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
+            if action.runner == "builtin":
+                return self._run_builtin(action, event, prompt, cwd, job_id)
+            output = self._run_command(action, event, extra, prompt, cwd)
+            return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
         except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "prompt": prompt, "error": str(exc)}
+            return {"status": "error", "runner": action.runner, "prompt": prompt, "error": str(exc)}
+
+    def _resolve_workspace(self, cwd: str | None) -> Path:
+        root = self.workspace or Path.cwd()
+        root = root.resolve()
+        if not cwd:
+            return root
+        candidate = Path(cwd)
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return root
+        if resolved == root or root in resolved.parents:
+            return resolved
+        return root
+
+    def _run_builtin(
+        self,
+        action: AgentAction,
+        event: FileEvent,
+        prompt: str,
+        cwd: str | None,
+        job_id: str,
+    ) -> dict[str, Any]:
+        from filewatch.agent.loop import run_builtin_agent
+
+        workspace = self._resolve_workspace(cwd)
+        log_dir = self.store.dir / "agent-logs"
+        result = run_builtin_agent(
+            prompt=prompt,
+            event=event,
+            workspace=workspace,
+            job_id=job_id,
+            log_dir=log_dir,
+            timeout_seconds=action.timeout_seconds,
+            max_steps=action.max_steps,
+            model=action.model,
+            suppress=self.suppress,
+        )
+        record: dict[str, Any] = {
+            "status": result.status,
+            "runner": "builtin",
+            "prompt": prompt,
+            "output": result.output,
+            "steps": result.steps,
+            "tool_calls": result.tool_calls,
+            "log": result.log_path,
+        }
+        if result.error:
+            record["error"] = result.error
+        if result.message:
+            record["message"] = result.message
+        return record
 
     def _run_command(
         self,

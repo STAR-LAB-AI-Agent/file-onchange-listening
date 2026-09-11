@@ -19,10 +19,11 @@ SYSTEM_PROMPT = """你是 filewatch 规则编译器。把用户口语转成 JSON
 约束：
 - when.types 只能是 created / modified / deleted / moved
 - 递归 glob 写 **/*.ext，不要只写 *.ext
-- 用户没说启动智能体时，then 只含 notify
+- 用户没说任务要求/启动智能体/处理文件时，then 只含 notify
 - 用户提到钉钉/群机器人时，notify.dingtalk 填写 webhook 与 secret（SEC 加签），interval_seconds 默认 60；未给地址则 dingtalk 为 null
 - 钉钉是按分钟汇总推送，不要改成即时 webhook
-- agent.runner 只能是 command 或 cursor_sdk；command 必须是字符串数组
+- 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null}}
+- agent.runner 默认 builtin（调用设置页 LLM）；高级用法才用 command（须 command 字符串数组）或 cursor_sdk
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
 - 未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false
 - 用户说替换/覆盖/只要这些时 mode=replace，否则 append

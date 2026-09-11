@@ -128,25 +128,42 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             dingtalk=_parse_dingtalk(payload.get("dingtalk")),
         )
     if kind == "agent":
-        runner = str(payload.get("runner", "command"))
-        if runner not in {"command", "cursor_sdk"}:
-            raise ConfigError("agent.runner 必须是 command 或 cursor_sdk")
         command = payload.get("command")
         argv = None
         if command is not None:
             if not isinstance(command, list) or not all(isinstance(x, str) for x in command):
                 raise ConfigError("agent.command 必须是字符串列表")
             argv = tuple(command)
+        runner_raw = payload.get("runner")
+        if runner_raw is None or runner_raw == "":
+            runner = "command" if argv else "builtin"
+        else:
+            runner = str(runner_raw)
+        if runner not in {"command", "cursor_sdk", "builtin"}:
+            raise ConfigError("agent.runner 必须是 command、cursor_sdk 或 builtin")
         if runner == "command" and not argv:
             raise ConfigError("runner 为 command 时必须提供 agent.command")
+        prompt = str(payload.get("prompt", "")).strip()
+        if runner == "builtin" and not prompt:
+            raise ConfigError("runner 为 builtin 时必须提供非空 agent.prompt（任务要求）")
+        if not prompt:
+            prompt = "File {{type}}: {{path}}"
         timeout = payload.get("timeout_seconds", 600)
+        max_steps = payload.get("max_steps", 24)
+        try:
+            max_steps_i = int(max_steps)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("agent.max_steps 必须是整数") from exc
+        if max_steps_i < 1:
+            raise ConfigError("agent.max_steps 必须 >= 1")
         return AgentAction(
             runner=runner,  # type: ignore[arg-type]
-            prompt=str(payload.get("prompt", "File {{type}}: {{path}}")),
+            prompt=prompt,
             command=argv,
             cwd=payload.get("cwd"),
             timeout_seconds=float(timeout),
             model=payload.get("model"),
+            max_steps=max_steps_i,
         )
     raise ConfigError(f"未知动作：{kind}")
 
@@ -358,6 +375,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                             "cwd": action.cwd,
                             "timeout_seconds": action.timeout_seconds,
                             "model": action.model,
+                            "max_steps": action.max_steps,
                         }
                     }
                 )

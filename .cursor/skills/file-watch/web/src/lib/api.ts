@@ -22,12 +22,13 @@ export type NotifyAction = {
 }
 
 export type AgentAction = {
-  runner?: "command" | "cursor_sdk"
+  runner?: "command" | "cursor_sdk" | "builtin"
   prompt?: string
   command?: string[] | null
   cwd?: string | null
   timeout_seconds?: number
   model?: string | null
+  max_steps?: number
 }
 
 export type RuleThen = {

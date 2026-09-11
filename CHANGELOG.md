@@ -4,9 +4,17 @@
 
 ## Unreleased
 
+## 2.0.0 - 2026-09-11
+
 ### 新增
 
 - `notify.dingtalk`：把规则命中的文件变化推到钉钉群机器人（Webhook + SEC 加签），默认每分钟汇总一次，无变化不发送。
+- `agent.runner: builtin`：规则写了任务要求即启动内置 Agent 循环，调用设置页 LLM，工具含 Read / Glob / Grep / Write / Bash / PowerShell；工具调用写入 `agent-logs/`；Write 会短期抑制同路径自触发。
+
+### 修改
+
+- 网页规则表单以「任务要求」为主路径（非空即 builtin）；`command` / `cursor_sdk` 仍可通过 YAML 使用。
+- `runner` 缺省：有 prompt 无 command → builtin；有 command → command。
 
 ## 1.1.4 - 2026-09-11
 

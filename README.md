@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **1.1.4**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **2.0.0**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -84,16 +84,16 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 - 「inbox 里新建或改了 markdown，通知我文件名和路径。」
 - 「命中的文件变化推到这个钉钉群，Webhook 是 `...`，SEC 是 `SECxxx`，每分钟汇总一次。」
 - 「`D:/data/inbox` 下出现新的 `*.pdf` 时告诉我，先不要启动别的智能体。」
-- 「docs 里 markdown 有改动就启动智能体做摘要，半分钟内同一文件只触发一次。」
+- 「docs 里 markdown 有改动就按参考格式重写，半分钟内同一文件只触发一次。」
 - 「再加一条：删除 `.tmp` 以外的文件也通知我；原来的 markdown 规则留着。」
 
-效果：口语被写成规则并校验；监听已在跑则热更新，没跑则启动。Agent 会回报已生效的规则名。没提智能体时默认只发通知。提到钉钉群时写入 `notify.dingtalk`，命中后按分钟汇总推送，而不是每个文件立刻发一条。没说要换目录时，原来的监听路径和是否递归保持不变。之后文件对上规则，就会进任务邮箱（或按你的要求拉起智能体）。
+效果：口语被写成规则并校验；监听已在跑则热更新，没跑则启动。Agent 会回报已生效的规则名。没提任务要求时默认只发通知。提到钉钉群时写入 `notify.dingtalk`，命中后按分钟汇总推送，而不是每个文件立刻发一条。写了任务要求时使用内置智能体（`agent.runner: builtin`，调用设置页 LLM）。没说要换目录时，原来的监听路径和是否递归保持不变。之后文件对上规则，就会进任务邮箱（或按你的要求拉起智能体）。
 
 调用细节见 [`.cursor/skills/file-watch/SKILL.md`](.cursor/skills/file-watch/SKILL.md)。
 
 ## 规则示例
 
-见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人 Webhook + SEC 加签，默认每分钟汇总一次）。`agent.runner` 可以是 `command` 或 `cursor_sdk`。
+见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人 Webhook + SEC 加签，默认每分钟汇总一次）。规则里写了**任务要求**（`agent.prompt`）即启动内置智能体：`runner: builtin`，调用设置页 LLM，带 Read / Glob / Grep / Write / Bash / PowerShell。高级用法仍可用 `command` 或 `cursor_sdk`。
 
 用户用自然语言描述规则时，由 Agent 改 YAML，先 `validate` 再对运行中的实例 `reload`（不必停掉守护进程）。`watch.path` / `recursive` 变更仍需重启。网页「监听规则」里的口语生成走 LLM，需先在设置页填写兼容 OpenAI 的 API Key。
 
