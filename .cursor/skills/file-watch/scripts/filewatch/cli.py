@@ -53,6 +53,10 @@ rules:
           title: "文件有变化"
           message: "{{type}}: {{path}}"
           mailbox: true
+          # dingtalk:
+          #   webhook: "https://oapi.dingtalk.com/robot/send?access_token=TOKEN"
+          #   secret: "SECxxx"
+          #   interval_seconds: 60
   # 取消注释后，新建 markdown 时会启动智能体。
   # - name: summarize-markdown
   #   when:

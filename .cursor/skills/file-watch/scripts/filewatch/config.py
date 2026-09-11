@@ -10,6 +10,7 @@ from filewatch.models import (
     EVENT_TYPES,
     AgentAction,
     Config,
+    DingTalkTarget,
     FileEvent,
     NotifyAction,
     Rule,
@@ -76,6 +77,35 @@ def _parse_when(raw: Any) -> When:
     )
 
 
+def _parse_dingtalk(raw: Any) -> DingTalkTarget | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("notify.dingtalk 必须是映射")
+    webhook_raw = raw.get("webhook")
+    if webhook_raw is not None and not isinstance(webhook_raw, str):
+        raise ConfigError("notify.dingtalk.webhook 必须是字符串")
+    webhook = (webhook_raw or "").strip()
+    secret_raw = raw.get("secret", raw.get("sec"))
+    if secret_raw is not None and not isinstance(secret_raw, str):
+        raise ConfigError("notify.dingtalk.secret 必须是字符串")
+    secret = (secret_raw or "").strip() or None
+    if not webhook:
+        if secret:
+            raise ConfigError("填写钉钉 SEC 时必须同时提供 notify.dingtalk.webhook")
+        return None
+    if not webhook.startswith(("http://", "https://")):
+        raise ConfigError("notify.dingtalk.webhook 必须是 http(s) 地址")
+    interval = raw.get("interval_seconds", 60)
+    try:
+        interval_f = float(interval)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("notify.dingtalk.interval_seconds 必须是数字") from exc
+    if interval_f <= 0:
+        raise ConfigError("notify.dingtalk.interval_seconds 必须大于 0")
+    return DingTalkTarget(webhook=webhook, secret=secret, interval_seconds=interval_f)
+
+
 def _parse_action(raw: Any) -> NotifyAction | AgentAction:
     if not isinstance(raw, dict) or len(raw) != 1:
         raise ConfigError("then 每一项必须是只含 notify 或 agent 之一的映射")
@@ -95,6 +125,7 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             message=str(payload.get("message", "{{type}}: {{path}}")),
             webhook=webhook,
             mailbox=mailbox,
+            dingtalk=_parse_dingtalk(payload.get("dingtalk")),
         )
     if kind == "agent":
         runner = str(payload.get("runner", "command"))
@@ -305,6 +336,15 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                             "message": action.message,
                             "webhook": action.webhook,
                             "mailbox": action.mailbox,
+                            "dingtalk": (
+                                {
+                                    "webhook": action.dingtalk.webhook,
+                                    "secret": action.dingtalk.secret,
+                                    "interval_seconds": action.dingtalk.interval_seconds,
+                                }
+                                if action.dingtalk
+                                else None
+                            ),
                         }
                     }
                 )

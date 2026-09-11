@@ -7,11 +7,18 @@ export type FileEvent = {
   is_dir?: boolean
 }
 
+export type DingTalkAction = {
+  webhook?: string | null
+  secret?: string | null
+  interval_seconds?: number
+}
+
 export type NotifyAction = {
   title?: string
   message?: string
   webhook?: string | null
   mailbox?: boolean
+  dingtalk?: DingTalkAction | null
 }
 
 export type AgentAction = {
@@ -108,6 +115,7 @@ export function blankRule(): WatchRule {
           message: "{{type}}: {{path}}",
           webhook: "",
           mailbox: true,
+          dingtalk: { webhook: "", secret: "", interval_seconds: 60 },
         },
       },
     ],

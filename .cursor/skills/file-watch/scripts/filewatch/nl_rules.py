@@ -14,12 +14,14 @@ SYSTEM_PROMPT = """你是 filewatch 规则编译器。把用户口语转成 JSON
 {"mode":"append"|"replace","notes":["中文说明"],"warnings":[],"rules":[{
   "name":"小写短横线英文id","enabled":true,
   "when":{"types":["created"],"glob":["**/*.md"],"regex":null,"is_dir":false,"min_size_bytes":null,"cooldown_seconds":0},
-  "then":[{"notify":{"title":"...","message":"{{type}}: {{path}}","webhook":null,"mailbox":true}}]
+  "then":[{"notify":{"title":"...","message":"{{type}}: {{path}}","webhook":null,"mailbox":true,"dingtalk":null}}]
 }]}
 约束：
 - when.types 只能是 created / modified / deleted / moved
 - 递归 glob 写 **/*.ext，不要只写 *.ext
 - 用户没说启动智能体时，then 只含 notify
+- 用户提到钉钉/群机器人时，notify.dingtalk 填写 webhook 与 secret（SEC 加签），interval_seconds 默认 60；未给地址则 dingtalk 为 null
+- 钉钉是按分钟汇总推送，不要改成即时 webhook
 - agent.runner 只能是 command 或 cursor_sdk；command 必须是字符串数组
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
 - 未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false

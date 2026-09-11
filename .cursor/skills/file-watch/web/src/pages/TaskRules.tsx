@@ -268,6 +268,9 @@ export function TaskRules({ watchId }: { watchId: string }) {
                           {action.notify ? "notify" : "agent"}
                         </Badge>
                       ))}
+                      {(rule.then || []).some((action) => action.notify?.dingtalk?.webhook) ? (
+                        <Badge variant="outline">钉钉</Badge>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap gap-1">
                       {(rule.when?.types || []).map((type) => (

@@ -101,6 +101,28 @@ def test_llm_replace_and_webhook() -> None:
     assert result["rules"][0]["then"][0]["notify"]["webhook"] == "https://example.invalid/hook"
 
 
+def test_yaml_dingtalk_is_parsed() -> None:
+    text = """
+- name: ding
+  when:
+    types: [created, modified]
+    glob: ["**/*"]
+    is_dir: false
+  then:
+    - notify:
+        title: 文件有变化
+        message: "{{type}}: {{path}}"
+        dingtalk:
+          webhook: "https://oapi.dingtalk.com/robot/send?access_token=tok"
+          secret: "SECxxx"
+"""
+    result = rules_from_text(text)
+    assert result["ok"] is True
+    ding = result["rules"][0]["then"][0]["notify"]["dingtalk"]
+    assert ding["webhook"].startswith("https://oapi.dingtalk.com/")
+    assert ding["secret"] == "SECxxx"
+
+
 def test_llm_fenced_json_is_parsed() -> None:
     def complete(_system: str, _user: str) -> str:
         return '```json\n{"mode":"append","rules":[{"name":"x","when":{"types":["deleted"],"glob":["**/*.png"]},"then":[{"notify":{"title":"t","message":"{{filename}}"}}]}]}\n```'

@@ -47,6 +47,8 @@ export function RuleForm({
   const [message, setMessage] = useState(notify0?.message || "{{type}}: {{path}}")
   const [webhook, setWebhook] = useState(notify0?.webhook || "")
   const [mailbox, setMailbox] = useState(notify0?.mailbox !== false)
+  const [dingWebhook, setDingWebhook] = useState(notify0?.dingtalk?.webhook || "")
+  const [dingSecret, setDingSecret] = useState(notify0?.dingtalk?.secret || "")
   const [useAgent, setUseAgent] = useState(!!agent0)
   const [runner, setRunner] = useState(agent0?.runner || "command")
   const [command, setCommand] = useState((agent0?.command || []).join(" "))
@@ -62,6 +64,13 @@ export function RuleForm({
           message: message.trim() || "{{type}}: {{path}}",
           webhook: webhook.trim() || null,
           mailbox,
+          dingtalk: dingWebhook.trim()
+            ? {
+                webhook: dingWebhook.trim(),
+                secret: dingSecret.trim() || null,
+                interval_seconds: 60,
+              }
+            : null,
         },
       },
     ]
@@ -166,13 +175,41 @@ export function RuleForm({
           <Input id="rule-title" value={title} onChange={(event) => setTitle(event.target.value)} />
         </div>
         <div className="grid gap-1.5">
-          <Label htmlFor="rule-webhook">Webhook（可选）</Label>
+          <Label htmlFor="rule-webhook">自定义 Webhook（可选，立即 POST）</Label>
           <Input id="rule-webhook" value={webhook} onChange={(event) => setWebhook(event.target.value)} placeholder="https://" />
         </div>
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="rule-message">通知内容</Label>
         <Input id="rule-message" value={message} onChange={(event) => setMessage(event.target.value)} className="font-mono" />
+      </div>
+      <div className="grid gap-3 rounded-lg border p-3">
+        <div className="space-y-1">
+          <Label>钉钉群机器人（可选）</Label>
+          <p className="text-xs text-muted-foreground">命中后每分钟汇总推送一次，没有新变化则不发送。Webhook 与 SEC 加签填在群机器人设置里。</p>
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="rule-ding-webhook">钉钉 Webhook</Label>
+          <Input
+            id="rule-ding-webhook"
+            value={dingWebhook}
+            onChange={(event) => setDingWebhook(event.target.value)}
+            placeholder="https://oapi.dingtalk.com/robot/send?access_token="
+            className="font-mono"
+          />
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="rule-ding-secret">钉钉 SEC</Label>
+          <Input
+            id="rule-ding-secret"
+            type="password"
+            value={dingSecret}
+            onChange={(event) => setDingSecret(event.target.value)}
+            placeholder="SECxxxxxxxx"
+            autoComplete="off"
+            className="font-mono"
+          />
+        </div>
       </div>
       <label className="flex items-center gap-2 text-sm">
         <Checkbox checked={mailbox} onCheckedChange={(checked) => setMailbox(!!checked)} />

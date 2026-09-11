@@ -57,6 +57,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 - `then` 每项只能是 `notify` 或 `agent` 之一。
 - 模板变量只能用 `{{path}}` `{{filename}}` `{{type}}` `{{watch_id}}` `{{ts}}` `{{old_path}}` `{{json}}` `{{rule}}`。
 - 用户没说启动智能体时，默认只写 `notify`（写入 jobs 邮箱）。
+- 用户要推到钉钉群时，在 `notify.dingtalk` 填写 `webhook` 和 `secret`（SEC 加签）。命中后每分钟汇总一次，不要写成即时 webhook。
 - 热更新时保留原来的 `watch.path` / `recursive`，除非用户明确要改监听目录。
 
 ## 流程
@@ -170,7 +171,11 @@ rules:
       - notify:
           title: "Markdown 有变化"
           message: "{{type}}: {{path}}"
-          webhook: "https://example.invalid/hook"   # 可选
+          webhook: "https://example.invalid/hook"   # 可选，立即 POST JSON
+          dingtalk:                                 # 可选，每分钟汇总推送到钉钉群
+            webhook: "https://oapi.dingtalk.com/robot/send?access_token=TOKEN"
+            secret: "SECxxx"
+            interval_seconds: 60
       - agent:
           runner: command
           command: ["python", "scripts/echo_agent.py"]
@@ -184,7 +189,7 @@ rules:
 
 `then` 动作：
 
-- `notify`：一律写入 `jobs` 流；可选 `webhook` POST。
+- `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON。可选 `dingtalk` 把命中事件按分钟汇总推到钉钉群（Webhook + SEC 加签；无变化不发送）。
 - `agent.runner: command`：执行 argv。prompt 走 stdin，同时设置 `FILEWATCH_PROMPT` 和 `FILEWATCH_EVENT_JSON`。
 - `agent.runner: cursor_sdk`：需要 `cursor-sdk` 和 `CURSOR_API_KEY`。会启动**一次新的**智能体 run，不会唤醒当前对话。
 

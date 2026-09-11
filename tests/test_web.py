@@ -235,6 +235,36 @@ def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> N
         assert payload["rules"] == ["manual"]
         status, payload = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
         assert payload["config"]["rules"][0]["name"] == "manual"
+
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules",
+            {
+                "rules": [
+                    {
+                        "name": "ding",
+                        "when": {"types": ["created"], "glob": ["**/*"], "is_dir": False},
+                        "then": [
+                            {
+                                "notify": {
+                                    "title": "文件有变化",
+                                    "message": "{{filename}}",
+                                    "dingtalk": {
+                                        "webhook": "https://oapi.dingtalk.com/robot/send?access_token=tok",
+                                        "secret": "SECxxx",
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+        assert status == 200, payload
+        status, payload = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
+        ding = payload["config"]["rules"][0]["then"][0]["notify"]["dingtalk"]
+        assert ding["webhook"].endswith("access_token=tok")
+        assert ding["secret"] == "SECxxx"
+        assert ding["interval_seconds"] == 60
     finally:
         httpd.shutdown()
         httpd.server_close()

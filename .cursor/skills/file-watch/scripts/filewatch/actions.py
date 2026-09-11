@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.request import Request, urlopen
 
+from filewatch.dingtalk import DingTalkBatcher
 from filewatch.models import AgentAction, FileEvent, NotifyAction, Rule
 from filewatch.store import WatchStore
 from filewatch.templates import render, render_argv
@@ -18,6 +20,8 @@ class ActionRunner:
     def __init__(self, store: WatchStore, max_workers: int = 1) -> None:
         self.store = store
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="filewatch-job")
+        self._dingtalk: DingTalkBatcher | None = None
+        self._dingtalk_lock = threading.Lock()
 
     def submit(self, event: FileEvent, rule: Rule) -> None:
         for index, action in enumerate(rule.then):
@@ -65,6 +69,22 @@ class ActionRunner:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"webhook: {exc}")
                 result["webhook"] = "error"
+        if action.dingtalk:
+            try:
+                self._batcher().enqueue(
+                    action.dingtalk,
+                    {
+                        "title": title,
+                        "message": message,
+                        "rule": rule.name,
+                        "watch_id": event.watch_id,
+                        "event": event.to_dict(),
+                    },
+                )
+                result["dingtalk"] = "queued"
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"dingtalk: {exc}")
+                result["dingtalk"] = "error"
         if errors:
             result["status"] = "error"
             result["error"] = "; ".join(errors)
@@ -141,5 +161,35 @@ class ActionRunner:
             raise RuntimeError(f"cursor agent status={status}: {text}")
         return str(text)
 
+    def _batcher(self) -> DingTalkBatcher:
+        with self._dingtalk_lock:
+            if self._dingtalk is None:
+                self._dingtalk = DingTalkBatcher(
+                    sender=self._send_dingtalk,
+                    on_flushed=self._on_dingtalk_flushed,
+                )
+                self._dingtalk.start()
+            return self._dingtalk
+
+    def _send_dingtalk(self, webhook: str, secret: str | None, payload: dict[str, Any]) -> None:
+        from filewatch import dingtalk as ding
+
+        ding.send_dingtalk(webhook, secret, payload)
+
+    def _on_dingtalk_flushed(self, record: dict[str, Any]) -> None:
+        job = {
+            "id": f"job_{uuid.uuid4().hex[:12]}",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "kind": "notify",
+            "batched": True,
+            **record,
+        }
+        self.store.append("jobs", job)
+
     def close(self, wait: bool = False) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
+        with self._dingtalk_lock:
+            batcher = self._dingtalk
+            self._dingtalk = None
+        if batcher is not None:
+            batcher.close()

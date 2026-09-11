@@ -53,11 +53,19 @@ class When:
 
 
 @dataclass(frozen=True)
+class DingTalkTarget:
+    webhook: str
+    secret: str | None = None
+    interval_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
 class NotifyAction:
     title: str = "File watch"
     message: str = "{{type}}: {{path}}"
     webhook: str | None = None
     mailbox: bool = True
+    dingtalk: DingTalkTarget | None = None
 
 
 @dataclass(frozen=True)
