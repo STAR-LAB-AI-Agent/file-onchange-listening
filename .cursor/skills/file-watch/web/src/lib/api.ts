@@ -8,6 +8,7 @@ export type FileEvent = {
 }
 
 export type DingTalkAction = {
+  channel?: string | null
   webhook?: string | null
   secret?: string | null
   interval_seconds?: number
@@ -18,7 +19,7 @@ export type NotifyAction = {
   message?: string
   webhook?: string | null
   mailbox?: boolean
-  dingtalk?: DingTalkAction | null
+  dingtalk?: DingTalkAction | string | boolean | null
 }
 
 export type AgentAction = {
@@ -36,6 +37,12 @@ export type RuleThen = {
   agent?: AgentAction
 }
 
+export type RuleActive = {
+  start?: string | null
+  end?: string | null
+  days?: string[]
+}
+
 export type RuleWhen = {
   types?: string[]
   glob?: string[]
@@ -43,6 +50,7 @@ export type RuleWhen = {
   is_dir?: boolean | null
   min_size_bytes?: number | null
   cooldown_seconds?: number
+  active?: RuleActive | string | null
 }
 
 export type WatchRule = {
@@ -75,6 +83,10 @@ export type WatcherInfo = {
   last_event?: FileEvent | null
   items?: FileEvent[]
   cursor?: number
+  page?: number
+  page_size?: number
+  pages?: number
+  total?: number
   message?: string
   config?: WatchConfig
   notes?: string[]
@@ -97,6 +109,60 @@ export const TYPE_LABEL: Record<string, string> = {
   moved: "移动",
 }
 
+export const WEEKDAY_IDS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const
+
+export const WEEKDAY_LABEL: Record<(typeof WEEKDAY_IDS)[number], string> = {
+  mon: "一",
+  tue: "二",
+  wed: "三",
+  thu: "四",
+  fri: "五",
+  sat: "六",
+  sun: "日",
+}
+
+function timeInputValue(value?: string | null): string {
+  if (!value) return ""
+  const match = value.trim().match(/^(\d{1,2}):([0-5]\d)/)
+  if (!match) return ""
+  return `${match[1].padStart(2, "0")}:${match[2]}`
+}
+
+export function normalizeActive(raw: RuleWhen["active"] | undefined): RuleActive | null {
+  if (raw == null || raw === "") return null
+  if (typeof raw === "string") {
+    const parts = raw.split("-")
+    if (parts.length < 2) return null
+    const start = timeInputValue(parts[0])
+    const end = timeInputValue(parts.slice(1).join("-")) || (parts[1]?.trim() === "24:00" ? "24:00" : "")
+    if (!start && !end) return null
+    return { start: start || null, end: end || null, days: [] }
+  }
+  const start = timeInputValue(raw.start)
+  const end = raw.end?.trim() === "24:00" ? "24:00" : timeInputValue(raw.end)
+  const days = (raw.days || []).filter((day): day is (typeof WEEKDAY_IDS)[number] =>
+    (WEEKDAY_IDS as readonly string[]).includes(day),
+  )
+  if (!start && !end && days.length === 0) return null
+  return { start: start || null, end: end || null, days }
+}
+
+export function formatActive(raw: RuleWhen["active"] | undefined): string {
+  const active = normalizeActive(raw)
+  if (!active) return ""
+  const selected = new Set(active.days || [])
+  const dayText =
+    selected.size === 0 || selected.size === 7
+      ? ""
+      : WEEKDAY_IDS.filter((day) => selected.has(day))
+          .map((day) => `周${WEEKDAY_LABEL[day]}`)
+          .join("、")
+  const hasTime = Boolean(active.start || active.end)
+  const timeText = hasTime ? `${active.start || "00:00"}–${active.end || "24:00"}` : "全天"
+  if (dayText && hasTime) return `${dayText} ${timeText}`
+  return dayText || timeText
+}
+
 export function blankRule(): WatchRule {
   return {
     name: "",
@@ -108,6 +174,7 @@ export function blankRule(): WatchRule {
       is_dir: false,
       min_size_bytes: null,
       cooldown_seconds: 0,
+      active: null,
     },
     then: [
       {
@@ -116,11 +183,29 @@ export function blankRule(): WatchRule {
           message: "{{type}}: {{path}}",
           webhook: "",
           mailbox: true,
-          dingtalk: { webhook: "", secret: "", interval_seconds: 60 },
+          dingtalk: null,
         },
       },
     ],
   }
+}
+
+const CST_FORMAT = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+})
+
+export function formatEventTime(ts: string | undefined) {
+  if (!ts) return ""
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return ts
+  return CST_FORMAT.format(date)
 }
 
 export function relPath(path: string | undefined, root: string | undefined) {
@@ -202,5 +287,37 @@ export type LlmSettings = {
   model?: string
   api_key_set?: boolean
   api_key_masked?: string
+}
+
+export type DingTalkChannel = {
+  id: string
+  name: string
+  webhook?: string
+  secret_set?: boolean
+  secret_masked?: string
+  interval_seconds?: number
+}
+
+export type AppSettings = {
+  llm: LlmSettings
+  dingtalk?: { channels?: DingTalkChannel[] }
+}
+
+export function dingtalkSelection(ding: NotifyAction["dingtalk"] | undefined): string {
+  if (ding == null || ding === false) return ""
+  if (ding === true) return "*"
+  if (typeof ding === "string") {
+    const text = ding.trim()
+    if (!text || text === "false") return ""
+    if (text === "true" || text === "default" || text === "*") return "*"
+    return text
+  }
+  if (ding.webhook) return "__legacy__"
+  if (ding.channel) return ding.channel
+  return ""
+}
+
+export function hasDingtalk(notify?: NotifyAction | null): boolean {
+  return dingtalkSelection(notify?.dingtalk) !== ""
 }
 

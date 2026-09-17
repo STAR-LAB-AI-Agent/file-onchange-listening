@@ -23,12 +23,15 @@ import {
   ApiError,
   api,
   blankRule,
+  formatActive,
   navigate,
   typeBadgeClass,
+  type AppSettings,
+  type DingTalkChannel,
   type GeneratedRulesResponse,
-  type LlmSettings,
   type WatchRule,
   type WatcherInfo,
+  hasDingtalk,
 } from "@/lib/api"
 
 export function TaskRules({ watchId }: { watchId: string }) {
@@ -44,6 +47,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
   const [preview, setPreview] = useState<WatchRule[] | null>(null)
   const [editor, setEditor] = useState<{ index: number | null; rule: WatchRule } | null>(null)
   const [keySet, setKeySet] = useState<boolean | null>(null)
+  const [channels, setChannels] = useState<DingTalkChannel[]>([])
 
   const load = useCallback(async () => {
     const data = await api<WatcherInfo>(`/api/watchers/${encodeURIComponent(watchId)}/config`)
@@ -58,8 +62,11 @@ export function TaskRules({ watchId }: { watchId: string }) {
   }, [load])
 
   useEffect(() => {
-    void api<{ llm: LlmSettings }>("/api/settings")
-      .then((data) => setKeySet(!!data.llm.api_key_set))
+    void api<AppSettings>("/api/settings")
+      .then((data) => {
+        setKeySet(!!data.llm.api_key_set)
+        setChannels(data.dingtalk?.channels || [])
+      })
       .catch(() => setKeySet(null))
   }, [])
 
@@ -255,7 +262,9 @@ export function TaskRules({ watchId }: { watchId: string }) {
             <div className="py-10 text-center text-sm text-muted-foreground">还没有规则。命中规则后会写入 jobs 邮箱。</div>
           ) : (
             <div className="flex flex-col gap-3">
-              {rules.map((rule, index) => (
+              {rules.map((rule, index) => {
+                const activeLabel = formatActive(rule.when?.active)
+                return (
                 <div key={`${rule.name}-${index}`} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-2">
@@ -268,7 +277,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
                           {action.notify ? "notify" : "agent"}
                         </Badge>
                       ))}
-                      {(rule.then || []).some((action) => action.notify?.dingtalk?.webhook) ? (
+                      {(rule.then || []).some((action) => hasDingtalk(action.notify)) ? (
                         <Badge variant="outline">钉钉</Badge>
                       ) : null}
                     </div>
@@ -283,6 +292,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
                       {(rule.when?.glob || []).join(", ") || "匹配全部路径"}
                       {rule.when?.regex ? ` · re ${rule.when.regex}` : ""}
                       {rule.when?.cooldown_seconds ? ` · 冷却 ${rule.when.cooldown_seconds}s` : ""}
+                      {activeLabel ? ` · ${activeLabel}` : ""}
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -320,26 +330,30 @@ export function TaskRules({ watchId }: { watchId: string }) {
                     </Button>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </CardContent>
       </Card>
 
       <Dialog open={!!editor} onOpenChange={(open) => !open && setEditor(null)}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl">
+          <DialogHeader className="shrink-0">
             <DialogTitle>{editor?.index == null ? "添加规则" : "编辑规则"}</DialogTitle>
-            <DialogDescription>条件写在 when，动作默认 notify。模板可用 {"{{path}}"} {"{{type}}"} {"{{filename}}"}。</DialogDescription>
+            <DialogDescription>各输入框下方有说明和示例。模板可用 {"{{path}}"} {"{{type}}"} {"{{filename}}"}。</DialogDescription>
           </DialogHeader>
           {editor ? (
-            <RuleForm
-              key={`${editor.index}-${editor.rule.name}`}
-              initial={editor.rule}
-              submitting={saving}
-              onSubmit={upsertRule}
-              onCancel={() => setEditor(null)}
-            />
+            <div className="min-h-0 overflow-y-auto pr-1">
+              <RuleForm
+                key={`${editor.index}-${editor.rule.name}`}
+                initial={editor.rule}
+                channels={channels}
+                submitting={saving}
+                onSubmit={upsertRule}
+                onCancel={() => setEditor(null)}
+              />
+            </div>
           ) : null}
         </DialogContent>
       </Dialog>

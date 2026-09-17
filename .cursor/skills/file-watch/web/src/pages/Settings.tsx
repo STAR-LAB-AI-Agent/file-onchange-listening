@@ -1,12 +1,49 @@
-import { useEffect, useState } from "react"
-import { ArrowLeftIcon, Settings2Icon } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import { ArrowLeftIcon, PlusIcon, Settings2Icon, Trash2Icon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { api, navigate, type LlmSettings } from "@/lib/api"
+import { api, navigate, type AppSettings, type DingTalkChannel } from "@/lib/api"
+
+type ChannelDraft = {
+  key: string
+  id: string
+  name: string
+  webhook: string
+  secret: string
+  secret_set: boolean
+  secret_masked: string
+  interval_seconds: string
+}
+
+function toDraft(channel: DingTalkChannel, index: number): ChannelDraft {
+  return {
+    key: channel.id || `new-${index}`,
+    id: channel.id || "",
+    name: channel.name || "",
+    webhook: channel.webhook || "",
+    secret: "",
+    secret_set: !!channel.secret_set,
+    secret_masked: channel.secret_masked || "",
+    interval_seconds: String(channel.interval_seconds ?? 60),
+  }
+}
+
+function blankChannel(): ChannelDraft {
+  return {
+    key: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    id: "",
+    name: "",
+    webhook: "",
+    secret: "",
+    secret_set: false,
+    secret_masked: "",
+    interval_seconds: "60",
+  }
+}
 
 export function SettingsPage() {
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1")
@@ -14,12 +51,17 @@ export function SettingsPage() {
   const [apiKey, setApiKey] = useState("")
   const [masked, setMasked] = useState("")
   const [keySet, setKeySet] = useState(false)
+  const [channels, setChannels] = useState<ChannelDraft[]>([])
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [dingReady, setDingReady] = useState(false)
+  const channelsRef = useRef(channels)
+  channelsRef.current = channels
+  const loadGen = useRef(0)
+  const dingDirty = useRef(false)
 
-  async function load() {
-    const data = await api<{ llm: LlmSettings }>("/api/settings")
+  function applyLlm(data: AppSettings) {
     setBaseUrl(data.llm.base_url || "https://api.openai.com/v1")
     setModel(data.llm.model || "gpt-4o-mini")
     setKeySet(!!data.llm.api_key_set)
@@ -27,18 +69,39 @@ export function SettingsPage() {
     setApiKey("")
   }
 
+  function applyDingtalk(data: AppSettings, force = false) {
+    const incoming = data.dingtalk?.channels
+    if (!Array.isArray(incoming)) {
+      if (!force && dingDirty.current) return
+      if (!force) setChannels([])
+      return
+    }
+    if (!force && dingDirty.current) return
+    setChannels(incoming.map(toDraft))
+  }
+
   useEffect(() => {
-    void load().catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : "无法加载设置")
-    })
+    const gen = ++loadGen.current
+    void api<AppSettings>("/api/settings")
+      .then((data) => {
+        if (gen !== loadGen.current) return
+        applyLlm(data)
+        applyDingtalk(data)
+        setDingReady(true)
+      })
+      .catch((err: unknown) => {
+        if (gen !== loadGen.current) return
+        setError(err instanceof Error ? err.message : "无法加载设置")
+        setDingReady(true)
+      })
   }, [])
 
-  async function save(test: boolean) {
+  async function saveLlm(test: boolean) {
     setSaving(true)
     setError(null)
     setMessage(null)
     try {
-      const data = await api<{ llm: LlmSettings; message?: string }>("/api/settings", {
+      const data = await api<AppSettings & { message?: string }>("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -49,9 +112,7 @@ export function SettingsPage() {
           },
         }),
       })
-      setKeySet(!!data.llm.api_key_set)
-      setMasked(data.llm.api_key_masked || "")
-      setApiKey("")
+      applyLlm(data)
       if (test) {
         const ping = await api<{ message?: string }>("/api/settings/test", { method: "POST" })
         setMessage(ping.message || "LLM 连接正常")
@@ -69,20 +130,60 @@ export function SettingsPage() {
     setSaving(true)
     setError(null)
     try {
-      await api("/api/settings", {
+      const data = await api<AppSettings>("/api/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ llm: { clear_api_key: true } }),
       })
-      setKeySet(false)
-      setMasked("")
-      setApiKey("")
+      applyLlm(data)
       setMessage("已清除 API Key")
     } catch (err) {
       setError(err instanceof Error ? err.message : "清除失败")
     } finally {
       setSaving(false)
     }
+  }
+
+  async function saveDingtalk() {
+    setSaving(true)
+    setError(null)
+    setMessage(null)
+    loadGen.current += 1
+    const snapshot = channelsRef.current
+    try {
+      const data = await api<AppSettings & { message?: string }>("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dingtalk: {
+            channels: snapshot.map((item) => ({
+              id: item.id || undefined,
+              name: item.name.trim() || "钉钉群",
+              webhook: item.webhook.trim(),
+              secret: item.secret,
+              interval_seconds: Number(item.interval_seconds) || 60,
+            })),
+          },
+        }),
+      })
+      const saved = data.dingtalk?.channels
+      if (snapshot.length > 0 && (!Array.isArray(saved) || saved.length === 0)) {
+        setError("钉钉设置已提交，但响应里没有渠道。请刷新后检查，避免本地草稿被清空。")
+        return
+      }
+      dingDirty.current = false
+      applyDingtalk(data, true)
+      setMessage(data.message || "钉钉设置已保存")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function updateChannel(key: string, patch: Partial<ChannelDraft>) {
+    dingDirty.current = true
+    setChannels((current) => current.map((item) => (item.key === key ? { ...item, ...patch } : item)))
   }
 
   return (
@@ -93,9 +194,11 @@ export function SettingsPage() {
             <Settings2Icon className="size-5" />
             设置
           </h1>
-          <p className="text-sm text-muted-foreground">自然语言生成规则会调用兼容 OpenAI 的 Chat Completions。Key 保存在本机状态目录，不会写入被监听的文件夹。</p>
+          <p className="text-sm text-muted-foreground">
+            LLM 用于自然语言生成规则；钉钉机器人供规则下拉选择。凭证保存在本机状态目录，不会写入被监听的文件夹。
+          </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => navigate("/")}>
+        <Button type="button" variant="outline" size="sm" onClick={() => navigate("/")}>
           <ArrowLeftIcon data-icon="inline-start" />
           返回列表
         </Button>
@@ -146,14 +249,104 @@ export function SettingsPage() {
             />
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void save(false)} disabled={saving}>
+            <Button type="button" onClick={() => void saveLlm(false)} disabled={saving}>
               保存
             </Button>
-            <Button variant="outline" onClick={() => void save(true)} disabled={saving}>
+            <Button type="button" variant="outline" onClick={() => void saveLlm(true)} disabled={saving}>
               保存并测试连接
             </Button>
-            <Button variant="ghost" onClick={() => void clearKey()} disabled={saving || !keySet}>
+            <Button type="button" variant="ghost" onClick={() => void clearKey()} disabled={saving || !keySet}>
               清除 Key
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>钉钉推送</CardTitle>
+          <CardDescription>在这里填写群机器人 Webhook 和 SEC。添加规则时只需从下拉栏选择要推送到哪个群。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          {channels.length === 0 ? (
+            <p className="text-sm text-muted-foreground">还没有钉钉机器人。添加后即可在规则里选择。</p>
+          ) : (
+            channels.map((channel, index) => (
+              <div key={channel.key} className="grid gap-3 rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-sm font-medium">机器人 {index + 1}</div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      dingDirty.current = true
+                      setChannels((current) => current.filter((item) => item.key !== channel.key))
+                    }}
+                  >
+                    <Trash2Icon data-icon="inline-start" />
+                    删除
+                  </Button>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`ding-name-${channel.key}`}>名称</Label>
+                  <Input
+                    id={`ding-name-${channel.key}`}
+                    value={channel.name}
+                    onChange={(event) => updateChannel(channel.key, { name: event.target.value })}
+                    placeholder="工作群"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`ding-webhook-${channel.key}`}>Webhook</Label>
+                  <Input
+                    id={`ding-webhook-${channel.key}`}
+                    value={channel.webhook}
+                    onChange={(event) => updateChannel(channel.key, { webhook: event.target.value })}
+                    placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+                    className="font-mono"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`ding-secret-${channel.key}`}>SEC 加签</Label>
+                  <Input
+                    id={`ding-secret-${channel.key}`}
+                    type="password"
+                    value={channel.secret}
+                    onChange={(event) => updateChannel(channel.key, { secret: event.target.value })}
+                    placeholder={channel.secret_set ? `已保存 ${channel.secret_masked}，留空则不修改` : "SECxxxxxxxx"}
+                    autoComplete="off"
+                    className="font-mono"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor={`ding-interval-${channel.key}`}>汇总间隔（秒）</Label>
+                  <Input
+                    id={`ding-interval-${channel.key}`}
+                    type="number"
+                    min={1}
+                    value={channel.interval_seconds}
+                    onChange={(event) => updateChannel(channel.key, { interval_seconds: event.target.value })}
+                  />
+                </div>
+              </div>
+            ))
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!dingReady || saving}
+              onClick={() => {
+                dingDirty.current = true
+                setChannels((current) => [...current, blankChannel()])
+              }}
+            >
+              <PlusIcon data-icon="inline-start" />
+              添加机器人
+            </Button>
+            <Button type="button" onClick={() => void saveDingtalk()} disabled={!dingReady || saving}>
+              保存钉钉设置
             </Button>
           </div>
         </CardContent>
