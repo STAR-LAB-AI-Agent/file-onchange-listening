@@ -1,8 +1,10 @@
 # 更新日志
 
-本文件记录面向用户的变更。初始版本 **1.0.0**；小修改每次 +0.0.1；其余情况由用户指定版本。每个版本按 **新增**、**修改**、**修复** 分段。
-
 ## Unreleased
+
+### 修改
+
+- 钉钉 Webhook / SEC 改到设置页（`settings.json` 的 `dingtalk.channels`）。规则只选择渠道：`notify.dingtalk: true` 或 `{channel: 渠道id}`；添加规则时从下拉栏选择。规则里旧的 webhook/secret 仍可用。
 
 ## 2.0.0 - 2026-09-11
 
@@ -16,29 +18,12 @@
 - 网页规则表单以「任务要求」为主路径（非空即 builtin）；`command` / `cursor_sdk` 仍可通过 YAML 使用。
 - `runner` 缺省：有 prompt 无 command → builtin；有 command → command。
 
-## 1.1.4 - 2026-09-11
-
-### 修改
-
-- skill：改已有任务规则时先读状态目录 `config.json`；重启已停止任务须 `start --config` 原配置，禁止对已有路径 `start --path`；`serve` 须后台启动。
-
-## 1.1.3 - 2026-09-11
-
-### 修改
-
-- README 推荐工作流改为示例提示词及其效果（启动与网页、设置目录、新增规则）。
-
-## 1.1.2 - 2026-09-11
-
-### 修改
-
-- README 推荐工作流改为开头点明可用 Web，后续步骤全部用 Agent 调用 skill 的自然语言描述。
-
 ## 1.1.1 - 2026-09-11
 
 ### 修改
 
-- README 补充 Skill 推荐工作流：启动守护进程与 Web、在网页或通用 Agent 中设置监听目录与新增规则。
+- README 补充 Skill 推荐工作流：开头点明可用 Web；用示例提示词及其效果说明启动与网页、设置目录、新增规则（也可由 Agent 调用 skill）。
+- skill：改已有任务规则时先读状态目录 `config.json`；重启已停止任务须 `start --config` 原配置，禁止对已有路径 `start --path`；`serve` 须后台启动。
 
 ## 1.1.0 - 2026-09-11
 

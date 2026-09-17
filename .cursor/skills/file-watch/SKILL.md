@@ -2,13 +2,14 @@
 name: file-watch
 description: >-
   监听指定文件夹的新建、修改、删除、移动事件，按预设规则发送通知或启动智能体任务。
-  在用户用自然语言制定或修改监听规则、要求监听目录、等待新文件、启停 filewatch，
-  打开事件网页，或按文件变化条件触发任务时使用。把口语写成 YAML，validate 校验后再 reload 热更新。
+  在用户用自然语言制定或修改监听规则（含生效时段）、要求监听目录、等待新文件、启停 filewatch，
+  打开事件网页，配置钉钉推送，或按文件变化条件触发任务时使用。把口语写成 YAML，
+  钉钉 Webhook 写入设置而不是规则，validate 校验后再 reload 热更新。
 ---
 
 # 文件监听
 
-版本 **2.0.0**。
+版本 **2.0.6**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 
@@ -39,7 +40,9 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
    - 已有 → 记下 watch_id 和 home，读 home/config.json 当底稿
      （保留其 watch.path / recursive / debounce_ms / ignore 和全部旧规则）
    - 没有 → 再 init 或新建 watch.yaml
-2. 把自然语言合并进这份配置的 rules（追加则留旧规则；用户说替换才清空）
+2. 把自然语言合并进这份配置的 rules（追加则留旧规则；用户说替换才清空）。
+   用户提到工作日/周末/几点到几点/上班时间等 → 写 when.active；没说时段则省略（一直生效）。
+   若要推钉钉：先按「钉钉推送」写入 settings.json 的渠道，规则里只引用渠道，不要写 webhook。
 3. python scripts/filewatch_cli.py validate --config <这份文件>
 4. ok: false → 根据 message 改配置，再 validate，不要 reload / start
 5. list / status
@@ -54,12 +57,13 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 
 - 递归匹配用 `**/*.md`，不要只写 `*.md`。
 - `when.types` 只能是 `created` / `modified` / `deleted` / `moved`。
+- 用户提到生效时段、工作日、周末、几点到几点、上班时间、晚上才通知时，写 `when.active`（本机本地时间，不要写时区）。工作日 `days: [mon, tue, wed, thu, fri]`，周末 `[sat, sun]`。没说时段则省略 `active`，不要自行编造。`end` 早于 `start` 表示跨天（如 `22:00`–`06:00`）。也可写成 `active: "09:00-18:00"`。
 - `then` 每项只能是 `notify` 或 `agent` 之一。
 - 模板变量只能用 `{{path}}` `{{filename}}` `{{type}}` `{{watch_id}}` `{{ts}}` `{{old_path}}` `{{json}}` `{{rule}}`。
 - 用户没说启动智能体/任务要求时，默认只写 `notify`（写入 jobs 邮箱）。
 - 用户要按文件变化执行任务时，写 `agent.runner: builtin`，把任务要求放进 `prompt`；会调用设置页 LLM，带 Read/Glob/Grep/Write/Bash/PowerShell 工具循环。
 - 高级用法仍可用 `command` / `cursor_sdk`。
-- 用户要推到钉钉群时，在 `notify.dingtalk` 填写 `webhook` 和 `secret`（SEC 加签）。命中后每分钟汇总一次，不要写成即时 webhook。
+- 用户要推到钉钉群时，**不要**把 Webhook/SEC 写进规则 YAML。先写入设置里的 `dingtalk.channels`（见「钉钉推送」），规则只写 `notify.dingtalk: true` 或 `{channel: 渠道id}`。命中后每分钟汇总一次，不要写成即时 `notify.webhook`。
 - 热更新时保留原来的 `watch.path` / `recursive`，除非用户明确要改监听目录。
 
 ## 流程
@@ -68,7 +72,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 
 1. 编写 `watch.yaml`，填好 `watch.path` 和 `rules`。示例见 `examples/watch.yaml`。
 2. `python scripts/filewatch_cli.py validate --config examples/watch.yaml` 检查语法。
-3. `python scripts/filewatch_cli.py test-rule --config examples/watch.yaml --path <file> --type created` 确认规则能命中。
+3. `python scripts/filewatch_cli.py test-rule --config examples/watch.yaml --path <file> --type created` 确认规则能命中。带 `when.active` 的规则按**调用当时的本地时间**判断，时段外 `matched` 为空是正常结果。
 4. 未运行则 `start --config examples/watch.yaml`；已运行则 `reload --config examples/watch.yaml --id <watch_id>`。不要 `start --path`。
 5. 消费邮箱：
    - 原始文件系统事件：`wait --stream events`
@@ -117,6 +121,7 @@ python scripts/filewatch_cli.py serve --port 8765
 1. list，按 path 找到实例
 2. 读 home/config.json（不要 init 一份只含新规则的 YAML）
 3. 把改动合并进 rules，其余字段原样保留
+   钉钉凭证写入 settings.json 的 dingtalk.channels，规则只写 true 或 {channel: id}
 4. 工作副本可写成 YAML 或继续用 JSON；validate --config <副本>
 5. running → reload --config <副本> --id <watch_id>
    未运行 → start --config <副本> --id <watch_id>
@@ -130,13 +135,57 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 不要对已有路径再 `start --path`：未运行时会写成空规则并覆盖已保存配置。已在运行则 `start` 不会应用新配置，应 `reload`。
 
+## 钉钉推送
+
+凭证只放状态目录的 `settings.json`，禁止放进被监听路径，也禁止写进 `watch.yaml` / `config.json` 的规则。
+
+文件：`%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME/settings.json`）。
+
+用户给出钉钉 Webhook / SEC 时，由当前对话 Agent 写入设置，不要让用户去设置页手填（用户明确说自己填除外）：
+
+```text
+1. 读现有 settings.json；没有文件就当 {}
+2. 原样保留 llm（不要清掉 API Key）
+3. 合并 dingtalk.channels：追加新渠道，或按 id / name 更新已有项
+4. 写回该文件
+5. 规则 notify.dingtalk 只引用渠道：true（第一条）或 {channel: "<id>"}
+```
+
+渠道字段：
+
+```json
+{
+  "llm": {"base_url": "...", "model": "...", "api_key": "..."},
+  "dingtalk": {
+    "channels": [
+      {
+        "id": "work",
+        "name": "工作群",
+        "webhook": "https://oapi.dingtalk.com/robot/send?access_token=TOKEN",
+        "secret": "SECxxx",
+        "interval_seconds": 60
+      }
+    ]
+  }
+}
+```
+
+`id` 用英文短横线（如 `work`），不要用中文当 id。`secret` 可空。`interval_seconds` 缺省 60。合并时不要丢掉其它已有渠道。
+
+用户只说「推到钉钉」、没给地址：
+
+- `settings.json` 里已有渠道 → 规则写 `dingtalk: true`，或用户点名的 `{channel: id}`
+- 还没有渠道 → 打开设置页 `/settings`，或向用户要 Webhook 和 SEC；配好后再写规则。不要把 webhook 写进规则凑合
+
+旧规则里的 `notify.dingtalk.webhook` / `secret` 仍能运行。写新规则或改旧规则时，把凭证迁到 `dingtalk.channels`，规则改成渠道引用。
+
 ## 网页
 
 在本机打开任务面板。首页按监听目录列出任务；详情分「文件变化」和「监听规则」：
 
 - 文件变化：该目录的新建 / 修改 / 删除 / 移动
-- 监听规则：手动添加（任务要求非空即 builtin 智能体），或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
-- 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key。Key 写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`
+- 监听规则：手动添加（任务要求非空即 builtin 智能体；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
+- 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key，以及钉钉群机器人（名称、Webhook、SEC）。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`。规则里不要再写钉钉 webhook
 
 用户要打开面板时：
 
@@ -169,15 +218,16 @@ rules:
       glob: "**/*.md"
       is_dir: false
       cooldown_seconds: 30
+      # active:                     # 省略则一直生效
+      #   start: "09:00"
+      #   end: "18:00"
+      #   days: [mon, tue, wed, thu, fri]
     then:
       - notify:
           title: "Markdown 有变化"
           message: "{{type}}: {{path}}"
           webhook: "https://example.invalid/hook"   # 可选，立即 POST JSON
-          dingtalk:                                 # 可选，每分钟汇总推送到钉钉群
-            webhook: "https://oapi.dingtalk.com/robot/send?access_token=TOKEN"
-            secret: "SECxxx"
-            interval_seconds: 60
+          dingtalk: true                            # 使用设置页默认钉钉渠道；或 {channel: 渠道id}
       - agent:
           runner: builtin
           prompt: |
@@ -187,11 +237,25 @@ rules:
           max_steps: 24
 ```
 
-`when` 字段：`types`、`glob`（字符串或列表）、`regex`、`is_dir`、`min_size_bytes`、`cooldown_seconds`。
+`when` 字段：`types`、`glob`（字符串或列表）、`regex`、`is_dir`、`min_size_bytes`、`cooldown_seconds`、`active`。
+
+`active` 按**本机本地时间**限制规则何时可命中。省略、`null` 或空对象表示一直生效。
+
+```yaml
+when:
+  types: [created, modified]
+  glob: "**/*.md"
+  active:
+    start: "09:00"          # 可选，缺省 00:00
+    end: "18:00"            # 可选，缺省 24:00；早于 start 表示跨天，如 22:00–06:00
+    days: [mon, tue, wed, thu, fri]  # 可选，缺省每天；也可用 1–7（周一=1）
+```
+
+也可写成 `active: "09:00-18:00"`（每天该时段）。`start` 与 `end` 不能相同；全天只限制星期时只写 `days`。`test-rule` 按调用当时的本地时间判断时段。
 
 `then` 动作：
 
-- `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON。可选 `dingtalk` 把命中事件按分钟汇总推到钉钉群（Webhook + SEC 加签；无变化不发送）。
+- `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON（不是钉钉）。钉钉用 `dingtalk: true` 或 `{channel: id}`，凭证在设置 `dingtalk.channels`，命中后按分钟汇总（无变化不发送）。规则内 webhook/secret 仅兼容旧配置。
 - `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工具日志在 `home/agent-logs/<job_id>.jsonl`。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。
 - `agent.runner: command`：执行 argv。prompt 走 stdin，同时设置 `FILEWATCH_PROMPT` 和 `FILEWATCH_EVENT_JSON`。
 - `agent.runner: cursor_sdk`：需要 `cursor-sdk` 和 `CURSOR_API_KEY`。会启动**一次新的**智能体 run，不会唤醒当前对话。
