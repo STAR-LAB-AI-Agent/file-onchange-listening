@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from filewatch.llm import test_llm_connection
+from filewatch.models import EVENT_TYPES
 from filewatch.service import (
     apply_rules_from_text,
     describe_watcher,
@@ -105,7 +106,28 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             limit = _int_arg(query, "limit", 100) or 100
             limit = max(1, min(limit, 500))
             tail = _bool_arg(query, "tail")
-            payload = read_stream(watch_id, "events", since=since, limit=limit, tail=tail)
+            page = _int_arg(query, "page")
+            page_size = _int_arg(query, "page_size", 100) or 100
+            ts_from = _str_arg(query, "ts_from")
+            ts_to = _str_arg(query, "ts_to")
+            event_type = _str_arg(query, "type")
+            if event_type == "all":
+                event_type = None
+            if event_type and event_type not in EVENT_TYPES:
+                self._json(400, {"ok": False, "error": "bad_request", "message": "type 无效"})
+                return
+            payload = read_stream(
+                watch_id,
+                "events",
+                since=since,
+                limit=limit,
+                tail=tail,
+                page=page,
+                page_size=page_size,
+                ts_from=ts_from,
+                ts_to=ts_to,
+                event_type=event_type,
+            )
             self._json(200 if payload.get("ok") else 400, payload)
             return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
@@ -268,6 +290,14 @@ def _safe_webui_file(url_path: str) -> Path | None:
     if candidate.is_file():
         return candidate
     return None
+
+
+def _str_arg(query: dict[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    if not values:
+        return None
+    text = values[0].strip()
+    return text or None
 
 
 def _int_arg(query: dict[str, list[str]], name: str, default: int | None = None) -> int | None:

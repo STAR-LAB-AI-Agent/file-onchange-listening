@@ -1,12 +1,31 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from filewatch.paths import watcher_dir, watchers_root
+
+
+def parse_event_ts(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class WatchStore:
@@ -112,6 +131,66 @@ class WatchStore:
             if limit is not None and len(records) > limit:
                 records = records[-limit:]
             return records, consumed
+
+    def query_records(
+        self,
+        stream: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+        ts_from: str | None = None,
+        ts_to: str | None = None,
+        event_type: str | None = None,
+    ) -> dict[str, Any]:
+        page_size = max(1, min(int(page_size), 500))
+        page = max(1, int(page))
+        start_dt = parse_event_ts(ts_from) if ts_from else None
+        end_dt = parse_event_ts(ts_to) if ts_to else None
+        if ts_from and start_dt is None:
+            raise ValueError("ts_from")
+        if ts_to and end_dt is None:
+            raise ValueError("ts_to")
+        matched: list[dict[str, Any]] = []
+        cursor = 0
+        path = self.stream_path(stream)
+        if path.exists():
+            with path.open("r", encoding="utf-8") as handle:
+                while True:
+                    line = handle.readline()
+                    if line == "":
+                        break
+                    if not line.endswith("\n"):
+                        break
+                    cursor = handle.tell()
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    record = json.loads(stripped)
+                    if event_type and record.get("type") != event_type:
+                        continue
+                    if start_dt or end_dt:
+                        ts = parse_event_ts(record.get("ts"))
+                        if ts is None:
+                            continue
+                        if start_dt and ts < start_dt:
+                            continue
+                        if end_dt and ts > end_dt:
+                            continue
+                    matched.append(record)
+        matched.reverse()
+        total = len(matched)
+        pages = max(1, math.ceil(total / page_size)) if total else 1
+        if page > pages:
+            page = pages
+        offset = (page - 1) * page_size
+        return {
+            "items": matched[offset : offset + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": pages,
+            "cursor": cursor,
+        }
 
     def record_count(self, stream: str) -> int:
         path = self.stream_path(stream)

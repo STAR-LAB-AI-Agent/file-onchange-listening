@@ -4,6 +4,7 @@ import json
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -179,6 +180,52 @@ def test_web_lists_tasks_and_isolates_events(tmp_path: Path, monkeypatch) -> Non
         httpd.server_close()
 
 
+def test_web_events_page_and_time_range(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = _seed_watcher(
+        "inbox",
+        inbox,
+        {"id": "e1", "type": "created", "path": "a.txt", "ts": "2026-09-17T10:00:00Z"},
+    )
+    store.append("events", {"id": "e2", "type": "modified", "path": "b.txt", "ts": "2026-09-17T11:00:00Z"})
+    store.append("events", {"id": "e3", "type": "created", "path": "c.txt", "ts": "2026-09-17T12:00:00Z"})
+
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&page_size=2")
+        assert status == 200
+        assert data["total"] == 3
+        assert data["pages"] == 2
+        assert data["page_size"] == 2
+        assert [item["id"] for item in data["items"]] == ["e3", "e2"]
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=2&page_size=2")
+        assert status == 200
+        assert [item["id"] for item in data["items"]] == ["e1"]
+        status, data = _get(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/events?"
+            + urllib.parse.urlencode(
+                {
+                    "page": 1,
+                    "type": "created",
+                    "ts_from": "2026-09-17T18:30:00+08:00",
+                    "ts_to": "2026-09-17T20:00:59+08:00",
+                }
+            )
+        )
+        assert status == 200
+        assert [item["id"] for item in data["items"]] == ["e3"]
+        assert data["total"] == 1
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&ts_from=not-a-date")
+        assert status == 400
+        assert data["error"] == "bad_request"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
@@ -225,7 +272,12 @@ def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> N
                 "rules": [
                     {
                         "name": "manual",
-                        "when": {"types": ["deleted"], "glob": ["**/*.txt"], "is_dir": False},
+                        "when": {
+                            "types": ["deleted"],
+                            "glob": ["**/*.txt"],
+                            "is_dir": False,
+                            "active": {"start": "09:00", "end": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
+                        },
                         "then": [{"notify": {"title": "删了", "message": "{{path}}"}}],
                     }
                 ]
@@ -235,6 +287,11 @@ def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> N
         assert payload["rules"] == ["manual"]
         status, payload = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
         assert payload["config"]["rules"][0]["name"] == "manual"
+        assert payload["config"]["rules"][0]["when"]["active"] == {
+            "start": "09:00",
+            "end": "18:00",
+            "days": ["mon", "tue", "wed", "thu", "fri"],
+        }
 
         status, payload = _post(
             f"http://127.0.0.1:{port}/api/watchers/inbox/rules",
@@ -265,6 +322,64 @@ def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> N
         assert ding["webhook"].endswith("access_token=tok")
         assert ding["secret"] == "SECxxx"
         assert ding["interval_seconds"] == 60
+
+        status, payload = _put(
+            f"http://127.0.0.1:{port}/api/settings",
+            {
+                "dingtalk": {
+                    "channels": [
+                        {
+                            "id": "work",
+                            "name": "工作群",
+                            "webhook": "https://oapi.dingtalk.com/robot/send?access_token=from-settings",
+                            "secret": "SECfromsettings",
+                        }
+                    ]
+                }
+            },
+        )
+        assert status == 200, payload
+        assert payload["dingtalk"]["channels"][0]["id"] == "work"
+        assert "SECfromsettings" not in json.dumps(payload)
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules",
+            {
+                "rules": [
+                    {
+                        "name": "ding-channel",
+                        "when": {"types": ["created"], "glob": ["**/*"], "is_dir": False},
+                        "then": [{"notify": {"title": "文件有变化", "message": "{{filename}}", "dingtalk": {"channel": "work"}}}],
+                    }
+                ]
+            },
+        )
+        assert status == 200, payload
+        status, payload = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
+        ding = payload["config"]["rules"][0]["then"][0]["notify"]["dingtalk"]
+        assert ding == {"channel": "work"}
+
+        status, payload = _put(
+            f"http://127.0.0.1:{port}/api/settings",
+            {
+                "dingtalk": {
+                    "channels": [
+                        {
+                            "name": "备用群",
+                            "webhook": "https://oapi.dingtalk.com/robot/send?access_token=second",
+                            "secret": "SECsecond",
+                            "interval_seconds": 60,
+                        }
+                    ]
+                }
+            },
+        )
+        assert status == 200, payload
+        assert len(payload["dingtalk"]["channels"]) == 1
+        assert payload["dingtalk"]["channels"][0]["name"] == "备用群"
+        status, payload = _get(f"http://127.0.0.1:{port}/api/settings")
+        assert status == 200
+        assert len(payload["dingtalk"]["channels"]) == 1
+        assert payload["dingtalk"]["channels"][0]["webhook"].endswith("access_token=second")
     finally:
         httpd.shutdown()
         httpd.server_close()

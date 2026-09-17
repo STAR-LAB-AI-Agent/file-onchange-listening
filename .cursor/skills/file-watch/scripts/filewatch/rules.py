@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from filewatch.matching import any_glob_match
@@ -23,22 +24,23 @@ class RuleEngine:
         self.rules = rules
         self._last_hit = {key: ts for key, ts in self._last_hit.items() if key[0] in names}
 
-    def matches(self, event: FileEvent) -> list[Rule]:
+    def matches(self, event: FileEvent, *, now: datetime | None = None) -> list[Rule]:
         rel = relative_posix(self.root, Path(event.path))
         if rel is None:
             rel = to_posix(event.path)
         hits: list[Rule] = []
-        now = time.monotonic()
+        mono = time.monotonic()
+        wall = now if now is not None else datetime.now().astimezone()
         for rule in self.rules:
             if not rule.enabled:
                 continue
-            if not self._match_one(rule, event, rel, now):
+            if not self._match_one(rule, event, rel, mono, wall):
                 continue
             hits.append(rule)
-            self._last_hit[(rule.name, event.path)] = now
+            self._last_hit[(rule.name, event.path)] = mono
         return hits
 
-    def _match_one(self, rule: Rule, event: FileEvent, rel: str, now: float) -> bool:
+    def _match_one(self, rule: Rule, event: FileEvent, rel: str, mono: float, wall: datetime) -> bool:
         when = rule.when
         if event.type not in when.types:
             return False
@@ -57,8 +59,10 @@ class RuleEngine:
                 return False
             if size < when.min_size_bytes:
                 return False
+        if when.active is not None and not when.active.contains(wall):
+            return False
         if when.cooldown_seconds > 0:
             last = self._last_hit.get((rule.name, event.path), 0.0)
-            if now - last < when.cooldown_seconds:
+            if mono - last < when.cooldown_seconds:
                 return False
         return True

@@ -80,10 +80,12 @@ class ActionRunner:
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"webhook: {exc}")
                 result["webhook"] = "error"
-        if action.dingtalk:
+        if action.dingtalk and action.dingtalk.enabled:
             try:
+                from filewatch.settings import resolve_dingtalk
+
                 self._batcher().enqueue(
-                    action.dingtalk,
+                    resolve_dingtalk(action.dingtalk),
                     {
                         "title": title,
                         "message": message,

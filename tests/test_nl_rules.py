@@ -29,6 +29,27 @@ def test_yaml_blob_is_parsed() -> None:
     assert result["rules"][0]["when"]["glob"] == ["**/*.log"]
 
 
+def test_yaml_active_window_is_parsed() -> None:
+    text = """
+- name: workday
+  when:
+    types: [created]
+    glob: ["**/*"]
+    active:
+      start: "09:00"
+      end: "18:00"
+      days: [mon, tue, wed, thu, fri]
+  then:
+    - notify:
+        title: t
+        message: "{{filename}}"
+"""
+    result = rules_from_text(text)
+    assert result["ok"] is True
+    assert result["rules"][0]["when"]["active"]["start"] == "09:00"
+    assert result["rules"][0]["when"]["active"]["days"] == ["mon", "tue", "wed", "thu", "fri"]
+
+
 def test_invalid_yaml_rule_returns_bad_config() -> None:
     result = rules_from_text("- name: x\n  then: []\n")
     assert result["ok"] is False
@@ -121,6 +142,23 @@ def test_yaml_dingtalk_is_parsed() -> None:
     ding = result["rules"][0]["then"][0]["notify"]["dingtalk"]
     assert ding["webhook"].startswith("https://oapi.dingtalk.com/")
     assert ding["secret"] == "SECxxx"
+
+
+def test_yaml_dingtalk_channel_is_parsed() -> None:
+    text = """
+- name: ding
+  when:
+    types: [created]
+    glob: ["**/*"]
+  then:
+    - notify:
+        title: 文件有变化
+        message: "{{type}}: {{path}}"
+        dingtalk: true
+"""
+    result = rules_from_text(text)
+    assert result["ok"] is True
+    assert result["rules"][0]["then"][0]["notify"]["dingtalk"] is True
 
 
 def test_llm_fenced_json_is_parsed() -> None:

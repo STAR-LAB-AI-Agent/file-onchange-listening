@@ -240,10 +240,44 @@ def read_stream(
     since: int | None = None,
     limit: int = 100,
     tail: bool = False,
+    page: int | None = None,
+    page_size: int = 100,
+    ts_from: str | None = None,
+    ts_to: str | None = None,
+    event_type: str | None = None,
 ) -> dict[str, Any]:
     if stream not in STREAMS:
         return {"ok": False, "error": "bad_stream", "message": f"stream 必须是 {STREAMS} 之一"}
     store = store_for(watch_id)
+    if page is not None:
+        try:
+            queried = store.query_records(
+                stream,
+                page=page,
+                page_size=page_size,
+                ts_from=ts_from,
+                ts_to=ts_to,
+                event_type=event_type,
+            )
+        except ValueError as exc:
+            field = str(exc)
+            return {"ok": False, "error": "bad_request", "message": f"{field} 不是有效时间"}
+        items = queried["items"]
+        return {
+            "ok": True,
+            "watch_id": sanitize_id(watch_id),
+            "stream": stream,
+            "timed_out": not items,
+            "since": 0,
+            "cursor": queried["cursor"],
+            "count": len(items),
+            "items": items,
+            "page": queried["page"],
+            "page_size": queried["page_size"],
+            "pages": queried["pages"],
+            "total": queried["total"],
+            **describe_watcher(store),
+        }
     if tail and since is None:
         items, cursor = store.read_tail(stream, limit=limit)
         since = 0

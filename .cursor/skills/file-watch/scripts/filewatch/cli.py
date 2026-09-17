@@ -48,15 +48,14 @@ rules:
       types: [created, modified]
       glob: "**/*"
       is_dir: false
+      # active: {start: "09:00", end: "18:00", days: [mon, tue, wed, thu, fri]}
     then:
       - notify:
           title: "文件有变化"
           message: "{{type}}: {{path}}"
           mailbox: true
-          # dingtalk:
-          #   webhook: "https://oapi.dingtalk.com/robot/send?access_token=TOKEN"
-          #   secret: "SECxxx"
-          #   interval_seconds: 60
+          # dingtalk: true   # 使用设置页默认钉钉渠道
+          # 或 dingtalk: { channel: work }
   # 取消注释后，docs 下 markdown 变化时启动内置智能体（调用设置页 LLM）。
   # - name: rewrite-docs-md
   #   when:

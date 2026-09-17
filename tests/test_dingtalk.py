@@ -91,6 +91,31 @@ def test_parse_dingtalk_and_roundtrip() -> None:
     assert dumped["rules"][0]["then"][0]["notify"]["dingtalk"]["secret"] == "SECxxx"
 
 
+def test_parse_dingtalk_channel_and_true() -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": "."},
+            "rules": [
+                {
+                    "name": "docs",
+                    "when": {"types": ["created"]},
+                    "then": [{"notify": {"dingtalk": True}}],
+                },
+                {
+                    "name": "named",
+                    "when": {"types": ["created"]},
+                    "then": [{"notify": {"dingtalk": {"channel": "work"}}}],
+                },
+            ],
+        }
+    )
+    assert config.rules[0].then[0].dingtalk.channel == "*"
+    assert config_to_dict(config)["rules"][0]["then"][0]["notify"]["dingtalk"] is True
+    assert config.rules[1].then[0].dingtalk.channel == "work"
+    assert config_to_dict(config)["rules"][1]["then"][0]["notify"]["dingtalk"] == {"channel": "work"}
+
+
 def test_parse_dingtalk_rejects_bad_url() -> None:
     with pytest.raises(ConfigError, match="http"):
         parse_config_dict(
@@ -277,5 +302,74 @@ def test_notify_queues_dingtalk_until_flush(tmp_path: Path, monkeypatch) -> None
         assert "note.md" in posted[0]["markdown"]["text"]
         batched, _, _ = store.wait("jobs", cursor, timeout=1, limit=10)
         assert any(job.get("batched") and job.get("dingtalk") == "ok" for job in batched)
+    finally:
+        runner.close(wait=True)
+
+
+def test_notify_resolves_dingtalk_channel_from_settings(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    posted: list[dict] = []
+    monkeypatch.setattr(
+        "filewatch.dingtalk.send_dingtalk",
+        lambda webhook, secret, payload: posted.append({"webhook": webhook, "secret": secret, "payload": payload}),
+    )
+    from filewatch.settings import save_settings
+
+    save_settings(
+        {
+            "dingtalk": {
+                "channels": [
+                    {
+                        "id": "work",
+                        "name": "工作群",
+                        "webhook": "https://oapi.dingtalk.com/robot/send?access_token=tok",
+                        "secret": "SECxxx",
+                    }
+                ]
+            }
+        }
+    )
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(inbox)},
+            "rules": [
+                {
+                    "name": "docs",
+                    "when": {"types": ["created"], "glob": ["**/*"]},
+                    "then": [{"notify": {"title": "文件有变化", "message": "{{filename}}", "dingtalk": {"channel": "work"}}}],
+                }
+            ],
+        }
+    )
+    store = WatchStore("demo", root=tmp_path / "state")
+    store.ensure()
+    runner = ActionRunner(store)
+    event = FileEvent(
+        id="evt_1",
+        ts="2026-01-01T00:00:00Z",
+        watch_id="demo",
+        type="created",
+        path=str(inbox / "note.md"),
+        is_dir=False,
+    )
+    try:
+        runner.submit(event, config.rules[0])
+        items: list[dict] = []
+        cursor = 0
+        for _ in range(20):
+            chunk, cursor, _ = store.wait("jobs", cursor, timeout=0.2, limit=10)
+            items.extend(chunk)
+            if any(job.get("dingtalk") == "queued" for job in items):
+                break
+        assert any(job.get("dingtalk") == "queued" for job in items)
+        assert runner._dingtalk is not None
+        runner._dingtalk.flush_all()
+        assert len(posted) == 1
+        assert posted[0]["webhook"].endswith("access_token=tok")
+        assert posted[0]["secret"] == "SECxxx"
+        assert "note.md" in posted[0]["payload"]["markdown"]["text"]
     finally:
         runner.close(wait=True)

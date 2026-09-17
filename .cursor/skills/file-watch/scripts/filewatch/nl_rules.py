@@ -13,19 +13,21 @@ SYSTEM_PROMPT = """你是 filewatch 规则编译器。把用户口语转成 JSON
 格式：
 {"mode":"append"|"replace","notes":["中文说明"],"warnings":[],"rules":[{
   "name":"小写短横线英文id","enabled":true,
-  "when":{"types":["created"],"glob":["**/*.md"],"regex":null,"is_dir":false,"min_size_bytes":null,"cooldown_seconds":0},
+  "when":{"types":["created"],"glob":["**/*.md"],"regex":null,"is_dir":false,"min_size_bytes":null,"cooldown_seconds":0,"active":null},
   "then":[{"notify":{"title":"...","message":"{{type}}: {{path}}","webhook":null,"mailbox":true,"dingtalk":null}}]
 }]}
 约束：
 - when.types 只能是 created / modified / deleted / moved
 - 递归 glob 写 **/*.ext，不要只写 *.ext
+- 用户指定生效时段时写 when.active：{"start":"09:00","end":"18:00","days":["mon","tue","wed","thu","fri"]}。未指定则 active 为 null（一直生效）。days 用 mon–sun；结束早于开始表示跨天。不要写时区。
 - 用户没说任务要求/启动智能体/处理文件时，then 只含 notify
-- 用户提到钉钉/群机器人时，notify.dingtalk 填写 webhook 与 secret（SEC 加签），interval_seconds 默认 60；未给地址则 dingtalk 为 null
+- 用户提到钉钉/群机器人时，notify.dingtalk 设为 true（用设置页默认渠道）；指定了渠道名或 id 则写 {"channel":"id"}。不要把 webhook/secret 写进规则
 - 钉钉是按分钟汇总推送，不要改成即时 webhook
 - 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null}}
 - agent.runner 默认 builtin（调用设置页 LLM）；高级用法才用 command（须 command 字符串数组）或 cursor_sdk
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
 - 未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false
+- 未指定时段时不要写 active，或写 null
 - 用户说替换/覆盖/只要这些时 mode=replace，否则 append
 """
 
@@ -154,7 +156,18 @@ def rules_from_text(
             return {"ok": False, "error": "bad_config", "message": str(exc)}
 
     names = "、".join(taken) if taken else "（无）"
-    user = f"已有规则名：{names}\n用户指定 mode：{mode or '未指定'}\n用户描述：\n{stripped}"
+    try:
+        from filewatch.settings import load_dingtalk_channels
+
+        ding_channels = load_dingtalk_channels()
+    except Exception:  # noqa: BLE001
+        ding_channels = ()
+    if ding_channels:
+        listing = "、".join(f"{item.id}（{item.name}）" for item in ding_channels)
+        ding_hint = f"可用钉钉渠道：{listing}。用户说钉钉且未指定渠道时 dingtalk=true。"
+    else:
+        ding_hint = "尚未配置钉钉渠道；用户说钉钉时仍可写 dingtalk=true，并在 notes 提醒去设置页添加机器人。"
+    user = f"已有规则名：{names}\n{ding_hint}\n用户指定 mode：{mode or '未指定'}\n用户描述：\n{stripped}"
     complete_fn = complete or chat_complete
     try:
         raw = complete_fn(SYSTEM_PROMPT, user)

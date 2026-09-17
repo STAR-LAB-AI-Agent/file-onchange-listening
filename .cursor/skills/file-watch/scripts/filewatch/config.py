@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from filewatch.models import (
+    DEFAULT_DINGTALK_CHANNEL,
     DEFAULT_IGNORE,
     EVENT_TYPES,
+    WEEKDAYS,
+    ActiveWindow,
     AgentAction,
     Config,
-    DingTalkTarget,
+    DingTalkRef,
     FileEvent,
     NotifyAction,
     Rule,
@@ -74,14 +77,200 @@ def _parse_when(raw: Any) -> When:
         is_dir=is_dir,
         min_size_bytes=min_size,
         cooldown_seconds=float(cooldown),
+        active=_parse_active(data.get("active")),
     )
 
 
-def _parse_dingtalk(raw: Any) -> DingTalkTarget | None:
-    if raw is None:
+_DAY_ALIASES = {
+    "mon": 1,
+    "monday": 1,
+    "1": 1,
+    "一": 1,
+    "周一": 1,
+    "星期一": 1,
+    "tue": 2,
+    "tues": 2,
+    "tuesday": 2,
+    "2": 2,
+    "二": 2,
+    "周二": 2,
+    "星期二": 2,
+    "wed": 3,
+    "wednesday": 3,
+    "3": 3,
+    "三": 3,
+    "周三": 3,
+    "星期三": 3,
+    "thu": 4,
+    "thur": 4,
+    "thurs": 4,
+    "thursday": 4,
+    "4": 4,
+    "四": 4,
+    "周四": 4,
+    "星期四": 4,
+    "fri": 5,
+    "friday": 5,
+    "5": 5,
+    "五": 5,
+    "周五": 5,
+    "星期五": 5,
+    "sat": 6,
+    "saturday": 6,
+    "6": 6,
+    "六": 6,
+    "周六": 6,
+    "星期六": 6,
+    "sun": 7,
+    "sunday": 7,
+    "0": 7,
+    "7": 7,
+    "日": 7,
+    "天": 7,
+    "周日": 7,
+    "周天": 7,
+    "星期日": 7,
+    "星期天": 7,
+}
+_TIME_RE = re.compile(r"^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?$")
+
+
+def _parse_hhmm(raw: Any, *, field: str, allow_end_of_day: bool = False) -> int | None:
+    if raw is None or raw == "":
         return None
+    if not isinstance(raw, str):
+        raise ConfigError(f"{field} 必须是 HH:MM 字符串")
+    text = raw.strip()
+    if allow_end_of_day and text in {"24:00", "24:00:00"}:
+        return 1440
+    match = _TIME_RE.fullmatch(text)
+    if not match:
+        raise ConfigError(f"{field} 必须是 HH:MM（0:00–23:59）")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23:
+        raise ConfigError(f"{field} 必须是 HH:MM（0:00–23:59）")
+    return hour * 60 + minute
+
+
+def _format_hhmm(minute: int | None) -> str | None:
+    if minute is None:
+        return None
+    if minute == 1440:
+        return "24:00"
+    hour, mins = divmod(minute, 60)
+    return f"{hour:02d}:{mins:02d}"
+
+
+def _parse_days(raw: Any) -> tuple[int, ...]:
+    if raw is None or raw == "":
+        return ()
+    if isinstance(raw, str):
+        items = [part for part in re.split(r"[,，\s]+", raw) if part]
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        raise ConfigError("when.active.days 必须是星期列表")
+    days: list[int] = []
+    seen: set[int] = set()
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ConfigError("when.active.days 的项必须是星期名或 1–7")
+        key = str(item).strip().lower()
+        iso = _DAY_ALIASES.get(key)
+        if iso is None:
+            raise ConfigError(f"when.active.days 含未知星期 {item!r}，应为 {list(WEEKDAYS)} 或 1–7")
+        if iso not in seen:
+            seen.add(iso)
+            days.append(iso)
+    if len(days) == 7:
+        return ()
+    return tuple(days)
+
+
+def _parse_active_range(text: str) -> tuple[int | None, int | None]:
+    stripped = text.strip()
+    if "-" not in stripped:
+        raise ConfigError("when.active 时间段必须是 start-end，例如 09:00-18:00")
+    start_raw, end_raw = stripped.split("-", 1)
+    start = _parse_hhmm(start_raw.strip(), field="when.active.start")
+    end = _parse_hhmm(end_raw.strip(), field="when.active.end", allow_end_of_day=True)
+    return start, end
+
+
+def _build_active(start: int | None, end: int | None, days: tuple[int, ...] = ()) -> ActiveWindow | None:
+    if start is not None and end is not None and start == end:
+        raise ConfigError("when.active.start 与 end 不能相同；全天请省略时间")
+    if (start in {None, 0}) and (end in {None, 1440}) and not days:
+        return None
+    return ActiveWindow(start_minute=start, end_minute=end, days=days)
+
+
+def _parse_active(raw: Any) -> ActiveWindow | None:
+    if raw is None or raw is True or raw == "":
+        return None
+    if raw is False:
+        raise ConfigError("when.active 不能为 false；停用规则请设 enabled: false")
+    if isinstance(raw, str):
+        start, end = _parse_active_range(raw)
+        return _build_active(start, end)
     if not isinstance(raw, dict):
-        raise ConfigError("notify.dingtalk 必须是映射")
+        raise ConfigError("when.active 必须是映射、时间段字符串，或省略")
+    start = _parse_hhmm(raw.get("start"), field="when.active.start")
+    end = _parse_hhmm(raw.get("end"), field="when.active.end", allow_end_of_day=True)
+    return _build_active(start, end, _parse_days(raw.get("days")))
+
+
+def dump_active(window: ActiveWindow | None) -> dict[str, Any] | None:
+    if window is None:
+        return None
+    return {
+        "start": _format_hhmm(window.start_minute),
+        "end": _format_hhmm(window.end_minute),
+        "days": [WEEKDAYS[day - 1] for day in window.days],
+    }
+
+
+def _parse_interval_seconds(raw: Any, *, default: float = 60.0) -> float:
+    if raw is None or raw == "":
+        return default
+    try:
+        interval_f = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("notify.dingtalk.interval_seconds 必须是数字") from exc
+    if interval_f <= 0:
+        raise ConfigError("notify.dingtalk.interval_seconds 必须大于 0")
+    return interval_f
+
+
+def _normalize_channel(raw: str) -> str:
+    text = raw.strip()
+    if text.lower() in {"true", "default", DEFAULT_DINGTALK_CHANNEL}:
+        return DEFAULT_DINGTALK_CHANNEL
+    return text
+
+
+def _parse_dingtalk(raw: Any) -> DingTalkRef | None:
+    if raw is None or raw is False:
+        return None
+    if raw is True:
+        return DingTalkRef(channel=DEFAULT_DINGTALK_CHANNEL)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text or text.lower() in {"false", "none", "null"}:
+            return None
+        return DingTalkRef(channel=_normalize_channel(text))
+    if not isinstance(raw, dict):
+        raise ConfigError("notify.dingtalk 必须是布尔值、渠道 id 或映射")
+    channel_raw = raw.get("channel")
+    if channel_raw is not None and not isinstance(channel_raw, str) and not isinstance(channel_raw, bool):
+        raise ConfigError("notify.dingtalk.channel 必须是字符串")
+    if channel_raw is True:
+        channel = DEFAULT_DINGTALK_CHANNEL
+    elif isinstance(channel_raw, str):
+        channel = _normalize_channel(channel_raw) or None
+    else:
+        channel = None
     webhook_raw = raw.get("webhook")
     if webhook_raw is not None and not isinstance(webhook_raw, str):
         raise ConfigError("notify.dingtalk.webhook 必须是字符串")
@@ -90,20 +279,31 @@ def _parse_dingtalk(raw: Any) -> DingTalkTarget | None:
     if secret_raw is not None and not isinstance(secret_raw, str):
         raise ConfigError("notify.dingtalk.secret 必须是字符串")
     secret = (secret_raw or "").strip() or None
-    if not webhook:
-        if secret:
-            raise ConfigError("填写钉钉 SEC 时必须同时提供 notify.dingtalk.webhook")
+    interval_f = _parse_interval_seconds(raw.get("interval_seconds", 60 if webhook else None))
+    if webhook:
+        if not webhook.startswith(("http://", "https://")):
+            raise ConfigError("notify.dingtalk.webhook 必须是 http(s) 地址")
+        return DingTalkRef(webhook=webhook, secret=secret, interval_seconds=interval_f)
+    if secret and not channel:
+        raise ConfigError("填写钉钉 SEC 时必须同时提供 notify.dingtalk.webhook 或 channel")
+    if channel:
+        return DingTalkRef(channel=channel)
+    return None
+
+
+def dump_dingtalk(ref: DingTalkRef | None) -> Any:
+    if ref is None or not ref.enabled:
         return None
-    if not webhook.startswith(("http://", "https://")):
-        raise ConfigError("notify.dingtalk.webhook 必须是 http(s) 地址")
-    interval = raw.get("interval_seconds", 60)
-    try:
-        interval_f = float(interval)
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("notify.dingtalk.interval_seconds 必须是数字") from exc
-    if interval_f <= 0:
-        raise ConfigError("notify.dingtalk.interval_seconds 必须大于 0")
-    return DingTalkTarget(webhook=webhook, secret=secret, interval_seconds=interval_f)
+    if (ref.webhook or "").strip():
+        return {
+            "webhook": ref.webhook,
+            "secret": ref.secret,
+            "interval_seconds": ref.interval_seconds,
+        }
+    channel = (ref.channel or "").strip()
+    if channel in {"", DEFAULT_DINGTALK_CHANNEL}:
+        return True
+    return {"channel": channel}
 
 
 def _parse_action(raw: Any) -> NotifyAction | AgentAction:
@@ -325,6 +525,7 @@ def summarize_config(config: Config) -> dict[str, Any]:
                 "is_dir": rule.when.is_dir,
                 "min_size_bytes": rule.when.min_size_bytes,
                 "cooldown_seconds": rule.when.cooldown_seconds,
+                "active": dump_active(rule.when.active),
                 "actions": actions,
             }
         )
@@ -353,15 +554,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                             "message": action.message,
                             "webhook": action.webhook,
                             "mailbox": action.mailbox,
-                            "dingtalk": (
-                                {
-                                    "webhook": action.dingtalk.webhook,
-                                    "secret": action.dingtalk.secret,
-                                    "interval_seconds": action.dingtalk.interval_seconds,
-                                }
-                                if action.dingtalk
-                                else None
-                            ),
+                            "dingtalk": dump_dingtalk(action.dingtalk),
                         }
                     }
                 )
@@ -390,6 +583,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                     "is_dir": rule.when.is_dir,
                     "min_size_bytes": rule.when.min_size_bytes,
                     "cooldown_seconds": rule.when.cooldown_seconds,
+                    "active": dump_active(rule.when.active),
                 },
                 "then": then,
             }
