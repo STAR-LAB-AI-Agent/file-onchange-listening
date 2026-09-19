@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **2.1.2**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **2.1.3**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -49,7 +49,7 @@ python scripts/filewatch_cli.py stop
 python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor/skills/file-watch/examples/watch.yaml
 ```
 
-所有命令在 stdout 输出 JSON。状态目录默认是 `%LOCALAPPDATA%/filewatch`（可用 `FILEWATCH_HOME` 或 `--home` 覆盖），不要放进被监听的文件夹。
+所有命令在 stdout 输出 JSON。状态目录默认是 `%LOCALAPPDATA%/filewatch`（可用 `FILEWATCH_HOME` 或 `--home` 覆盖），不要放进被监听的文件夹。邮箱和守护进程日志按日切分，默认保留 14 天，可在设置页修改。
 
 调用协议见 [`.cursor/skills/file-watch/SKILL.md`](.cursor/skills/file-watch/SKILL.md)。
 
@@ -95,9 +95,9 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 
 ## 规则示例
 
-见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人，Webhook / SEC 在设置页，规则只选渠道，默认每分钟汇总一次）。规则里写了**任务要求**（`agent.prompt`）即启动内置智能体：`runner: builtin`，调用设置页 LLM，带 Read / Glob / Grep / Write / Bash / PowerShell。同一规则选了钉钉时，智能体成功完成后立刻推送最后一轮回复（不按分钟汇总）。高级用法仍可用 `command` 或 `cursor_sdk`。`when.active` 可限制规则只在本机某个时段/星期生效，省略则一直生效。反向规则 `exclude: true` 用于排除某类文件：命中后不入账、不触发其它规则。默认仍记录全部变化；`watch.record_all: false` 时只记录命中正向规则的文件。
+见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人，Webhook / SEC 在设置页，规则只选渠道，默认每分钟汇总一次）。规则里写了**任务要求**（`agent.prompt`）即启动内置智能体：`runner: builtin`，调用设置页 LLM，带 Read / Glob / Grep / Write / Bash / PowerShell，整次任务默认超时 1800 秒。同一规则选了钉钉时，智能体成功完成后立刻推送最后一轮回复（不按分钟汇总）。高级用法仍可用 `command` 或 `cursor_sdk`。`when.active` 可限制规则只在本机某个时段/星期生效，省略则一直生效。反向规则 `exclude: true` 用于排除某类文件：命中后不入账、不触发其它规则。默认仍记录全部变化；`watch.record_all: false` 时只记录命中正向规则的文件。
 
-用户用自然语言描述规则时，由 Agent 改 YAML，先 `validate` 再对运行中的实例 `reload`（不必停掉守护进程）。`watch.path` / `recursive` 变更仍需重启。网页「监听规则」里的口语生成走 LLM，需先在设置页填写 API Key，并按服务商选择 Chat Completions、Responses 或 Anthropic Messages。
+用户用自然语言描述规则时，由 Agent 改 YAML，先 `validate` 再对运行中的实例 `reload`（不必停掉守护进程）。`watch.path` / `recursive` 变更仍需重启。网页「监听规则」里的口语生成走 LLM，需先在设置页填写 API Key，并按服务商选择 Chat Completions、Responses 或 Anthropic Messages。输出无法校验或调用失败时，会把错误原因和上次输出再发一轮。
 
 ## 网页
 
@@ -105,7 +105,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 python .cursor/skills/file-watch/scripts/filewatch_cli.py serve --port 8765
 ```
 
-浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。同一端口再次启动会结束旧进程，只保留最新这次。首页按监听目录列出任务，名称默认为文件夹名，可在列表或详情页修改；添加目录时可关掉「默认监听全部文件变化」，任务页也可随时切换（`watch.record_all`）。详情里可以看文件变化（可按文件名或路径搜索；内容未变的修改不入列表；可读文本结算后直接显示行级 `+N / −M`，可展开增减行，不保留「行级结算中…」），也可以在「监听规则」里手动添加正向规则、排除规则，或用自然语言添加新规则（只追加，不改已有规则）。填写任务要求后，命中变化会启动内置智能体；若规则选了钉钉群，完成后立刻把最后一轮回复推过去。「智能体」页先按这些规则筛选，点进去再看该条的 SSE 实时日志轮。打开规则编辑后，可在表单顶部用「AI编辑」口语填入该条，确认后再保存。口语会调用 LLM，请先打开「设置」填写 API Key 并选择协议；接口地址旁可从常见国产 / 官方端点列表填入（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL` / `FILEWATCH_LLM_WIRE_API`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。事件入账去抖、行级快照等待（默认 30 秒）和最大文件（默认 256KB）也在设置页修改，保存后应用到已有任务。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
+浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。同一端口再次启动会结束旧进程，只保留最新这次。首页按监听目录列出任务，名称默认为文件夹名，可在列表或详情页修改；添加目录时可关掉「默认监听全部文件变化」，任务页也可随时切换（`watch.record_all`）。详情里可以看文件变化（可按文件名或路径搜索；内容未变的修改不入列表；可读文本结算后直接显示行级 `+N / −M`，可展开增减行，不保留「行级结算中…」；同一文件短时间反复变化会在文件变化列表上方单独列出候选，可勾选后加入同一条排除规则），也可以在「监听规则」里手动添加正向规则、排除规则，或用自然语言添加新规则（只追加，不改已有规则）。填写任务要求后，命中变化会启动内置智能体（默认超时 1800 秒，规则表单可改）；若规则选了钉钉群，完成后立刻把最后一轮回复推过去。「智能体」页先按这些规则筛选，点进去再看该条的 SSE 实时日志轮。打开规则编辑后，可在表单顶部用「AI编辑」口语填入该条，确认后再保存。口语会调用 LLM，请先打开「设置」填写 API Key 并选择协议；接口地址旁可从常见国产 / 官方端点列表填入（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL` / `FILEWATCH_LLM_WIRE_API`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。事件入账去抖、行级快照等待（默认 30 秒）、最大文件（默认 256KB）和日志保留天数也在设置页修改，保存后应用到已有任务。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
 
 改前端后在 `web/` 下构建，产物写入 `scripts/filewatch/webui/`：
 
