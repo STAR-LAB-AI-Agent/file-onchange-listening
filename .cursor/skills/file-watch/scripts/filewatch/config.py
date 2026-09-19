@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from filewatch.models import (
+    DEFAULT_DEBOUNCE_MS,
     DEFAULT_DINGTALK_CHANNEL,
     DEFAULT_IGNORE,
+    DEFAULT_LINE_DIFF_MAX_BYTES,
+    DEFAULT_LINE_DIFF_QUIET_MS,
     EVENT_TYPES,
     WEEKDAYS,
     ActiveWindow,
@@ -20,7 +24,6 @@ from filewatch.models import (
     WatchSettings,
     When,
 )
-from filewatch.paths import sanitize_id
 from filewatch.templates import render
 
 
@@ -41,6 +44,14 @@ def _as_tuple(value: Any, *, field: str) -> tuple[str, ...]:
             items.append(item)
         return tuple(items)
     raise ConfigError(f"{field} 必须是字符串或字符串列表")
+
+
+def _as_bool(value: Any, *, field: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ConfigError(f"{field} 必须是布尔值")
 
 
 def _parse_when(raw: Any) -> When:
@@ -374,14 +385,27 @@ def _parse_rule(raw: Any, index: int) -> Rule:
     name = raw.get("name")
     if not name or not isinstance(name, str):
         raise ConfigError(f"rules[{index}].name 必填")
-    then_raw = raw.get("then") or []
-    if not isinstance(then_raw, list) or not then_raw:
+    exclude = bool(raw.get("exclude", False))
+    then_raw = raw.get("then")
+    if then_raw is None:
+        then_raw = []
+    if not isinstance(then_raw, list):
+        raise ConfigError(f"rules[{index}].then 必须是列表")
+    when = _parse_when(raw.get("when"))
+    if exclude:
+        if then_raw:
+            raise ConfigError(f"rules[{index}] 反向规则不能包含 then")
+        if not when.glob and not when.regex:
+            raise ConfigError(f"rules[{index}] 反向规则必须提供 when.glob 或 when.regex")
+        return Rule(name=name, when=when, then=(), enabled=bool(raw.get("enabled", True)), exclude=True)
+    if not then_raw:
         raise ConfigError(f"rules[{index}].then 必须是非空列表")
     return Rule(
         name=name,
-        when=_parse_when(raw.get("when")),
+        when=when,
         then=tuple(_parse_action(item) for item in then_raw),
         enabled=bool(raw.get("enabled", True)),
+        exclude=False,
     )
 
 
@@ -420,6 +444,27 @@ def _lint_templates(config: Config) -> None:
                         _must_render(part, dummy, extra, f"{prefix}.agent.command[{part_index}]")
 
 
+WATCH_NAME_MAX = 80
+
+
+def folder_title(path: str | Path) -> str:
+    return (Path(path).name or "watch").strip() or "watch"
+
+
+def normalize_watch_name(name: object, *, path: str | Path) -> str:
+    fallback = folder_title(path)
+    if name is None:
+        return fallback
+    if not isinstance(name, str):
+        raise ConfigError("name 必须是字符串")
+    text = " ".join(name.split())
+    if not text:
+        return fallback
+    if len(text) > WATCH_NAME_MAX:
+        raise ConfigError(f"name 最长 {WATCH_NAME_MAX} 个字符")
+    return text
+
+
 def parse_config_dict(raw: dict[str, Any], *, source: str | None = None) -> Config:
     if "watch" not in raw or not isinstance(raw["watch"], dict):
         raise ConfigError("必须提供 watch 映射")
@@ -428,22 +473,25 @@ def parse_config_dict(raw: dict[str, Any], *, source: str | None = None) -> Conf
     if not path or not isinstance(path, str):
         raise ConfigError("watch.path 必填")
     ignore = _as_tuple(watch_raw.get("ignore"), field="watch.ignore")
-    debounce_ms = int(watch_raw.get("debounce_ms", 400))
-    line_diff_quiet_ms = int(watch_raw.get("line_diff_quiet_ms", 2000))
+    debounce_ms = int(watch_raw.get("debounce_ms", DEFAULT_DEBOUNCE_MS))
+    line_diff_quiet_ms = int(watch_raw.get("line_diff_quiet_ms", DEFAULT_LINE_DIFF_QUIET_MS))
+    line_diff_max_bytes = int(watch_raw.get("line_diff_max_bytes", DEFAULT_LINE_DIFF_MAX_BYTES))
     if debounce_ms < 0:
         raise ConfigError("watch.debounce_ms 必须 >= 0")
     if line_diff_quiet_ms < 0:
         raise ConfigError("watch.line_diff_quiet_ms 必须 >= 0")
+    if line_diff_max_bytes < 1:
+        raise ConfigError("watch.line_diff_max_bytes 必须 >= 1")
     settings = WatchSettings(
         path=path,
         recursive=bool(watch_raw.get("recursive", True)),
         debounce_ms=debounce_ms,
         line_diff_quiet_ms=line_diff_quiet_ms,
+        line_diff_max_bytes=line_diff_max_bytes,
         ignore=ignore or DEFAULT_IGNORE,
+        record_all=_as_bool(watch_raw.get("record_all"), field="watch.record_all", default=True),
     )
-    name = raw.get("name")
-    if name is None:
-        name = Path(path).name or "watch"
+    name = normalize_watch_name(raw.get("name"), path=path)
     rules_raw = raw.get("rules") or []
     if not isinstance(rules_raw, list):
         raise ConfigError("rules 必须是列表")
@@ -455,7 +503,7 @@ def parse_config_dict(raw: dict[str, Any], *, source: str | None = None) -> Conf
     if max_parallel < 1:
         raise ConfigError("max_parallel_jobs 必须 >= 1")
     config = Config(
-        name=sanitize_id(str(name)),
+        name=name,
         watch=settings,
         rules=rules,
         max_parallel_jobs=max_parallel,
@@ -468,13 +516,7 @@ def parse_config_dict(raw: dict[str, Any], *, source: str | None = None) -> Conf
 def _with_watch_path(config: Config, watch_path: Path) -> Config:
     return Config(
         name=config.name,
-        watch=WatchSettings(
-            path=str(watch_path),
-            recursive=config.watch.recursive,
-            debounce_ms=config.watch.debounce_ms,
-            line_diff_quiet_ms=config.watch.line_diff_quiet_ms,
-            ignore=config.watch.ignore,
-        ),
+        watch=replace(config.watch, path=str(watch_path)),
         rules=config.rules,
         max_parallel_jobs=config.max_parallel_jobs,
         source=config.source,
@@ -506,11 +548,27 @@ def load_config(path: str | Path) -> Config:
     return _with_watch_path(config, watch_path)
 
 
-def config_from_path(path: str, *, name: str | None = None, recursive: bool = True) -> Config:
+def config_from_path(
+    path: str,
+    *,
+    name: str | None = None,
+    recursive: bool = True,
+    record_all: bool = True,
+) -> Config:
+    from filewatch.settings import load_watch_timing
+
     resolved = Path(path).expanduser().resolve()
+    timing = load_watch_timing()
     return Config(
-        name=sanitize_id(name or resolved.name or "watch"),
-        watch=WatchSettings(path=str(resolved), recursive=recursive),
+        name=normalize_watch_name(name, path=resolved),
+        watch=WatchSettings(
+            path=str(resolved),
+            recursive=recursive,
+            debounce_ms=timing.debounce_ms,
+            line_diff_quiet_ms=timing.line_diff_quiet_ms,
+            line_diff_max_bytes=timing.line_diff_max_bytes,
+            record_all=record_all,
+        ),
     )
 
 
@@ -527,6 +585,7 @@ def summarize_config(config: Config) -> dict[str, Any]:
             {
                 "name": rule.name,
                 "enabled": rule.enabled,
+                "exclude": rule.exclude,
                 "types": list(rule.when.types),
                 "glob": list(rule.when.glob),
                 "regex": rule.when.regex,
@@ -541,8 +600,10 @@ def summarize_config(config: Config) -> dict[str, Any]:
         "name": config.name,
         "watch_path": config.watch.path,
         "recursive": config.watch.recursive,
+        "record_all": config.watch.record_all,
         "debounce_ms": config.watch.debounce_ms,
         "line_diff_quiet_ms": config.watch.line_diff_quiet_ms,
+        "line_diff_max_bytes": config.watch.line_diff_max_bytes,
         "ignore": list(config.watch.ignore),
         "max_parallel_jobs": config.max_parallel_jobs,
         "rules": rules,
@@ -585,6 +646,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
             {
                 "name": rule.name,
                 "enabled": rule.enabled,
+                "exclude": rule.exclude,
                 "when": {
                     "types": list(rule.when.types),
                     "glob": list(rule.when.glob),
@@ -603,8 +665,10 @@ def config_to_dict(config: Config) -> dict[str, Any]:
         "watch": {
             "path": config.watch.path,
             "recursive": config.watch.recursive,
+            "record_all": config.watch.record_all,
             "debounce_ms": config.watch.debounce_ms,
             "line_diff_quiet_ms": config.watch.line_diff_quiet_ms,
+            "line_diff_max_bytes": config.watch.line_diff_max_bytes,
             "ignore": list(config.watch.ignore),
         },
         "rules": rules,

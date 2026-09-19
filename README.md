@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **2.1.0**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **2.1.1**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -87,14 +87,15 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 - 「`D:/data/inbox` 下出现新的 `*.pdf` 时告诉我，先不要启动别的智能体。」
 - 「docs 里 markdown 有改动就按参考格式重写，半分钟内同一文件只触发一次。」
 - 「再加一条：删除 `.tmp` 以外的文件也通知我；原来的 markdown 规则留着。」
+- 「不要监听 log 和 tmp 文件。」
 
-效果：口语被写成规则并校验；监听已在跑则热更新，没跑则启动。Agent 会回报已生效的规则名。没提任务要求时默认只发通知。提到时段/工作日时写入 `when.active`，没说则一直生效。提到钉钉群时规则只选择设置页里的渠道（`notify.dingtalk: true` 或渠道 id），命中后按分钟汇总推送，而不是每个文件立刻发一条。写了任务要求时使用内置智能体（`agent.runner: builtin`，调用设置页 LLM）。没说要换目录时，原来的监听路径和是否递归保持不变。之后文件对上规则，就会进任务邮箱（或按你的要求拉起智能体）。
+效果：口语被写成规则并校验；监听已在跑则热更新，没跑则启动。Agent 会回报已生效的规则名。没提任务要求时默认只发通知。提到时段/工作日时写入 `when.active`，没说则一直生效。提到不监听/排除某类文件时写成反向规则（`exclude: true`），命中后该文件不会进入文件变化、也不会触发其它规则。提到钉钉群时规则只选择设置页里的渠道（`notify.dingtalk: true` 或渠道 id），命中后按分钟汇总推送，而不是每个文件立刻发一条。写了任务要求时使用内置智能体（`agent.runner: builtin`，调用设置页 LLM）。没说要换目录时，原来的监听路径和是否递归保持不变。之后文件对上规则，就会进任务邮箱（或按你的要求拉起智能体）。
 
 调用细节见 [`.cursor/skills/file-watch/SKILL.md`](.cursor/skills/file-watch/SKILL.md)。
 
 ## 规则示例
 
-见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人，Webhook / SEC 在设置页，规则只选渠道，默认每分钟汇总一次）。规则里写了**任务要求**（`agent.prompt`）即启动内置智能体：`runner: builtin`，调用设置页 LLM，带 Read / Glob / Grep / Write / Bash / PowerShell。高级用法仍可用 `command` 或 `cursor_sdk`。`when.active` 可限制规则只在本机某个时段/星期生效，省略则一直生效。
+见 `examples/watch.yaml`。`notify` 写入 `jobs` 邮箱，也可选立即 POST 的 webhook，或 `dingtalk`（钉钉群机器人，Webhook / SEC 在设置页，规则只选渠道，默认每分钟汇总一次）。规则里写了**任务要求**（`agent.prompt`）即启动内置智能体：`runner: builtin`，调用设置页 LLM，带 Read / Glob / Grep / Write / Bash / PowerShell。高级用法仍可用 `command` 或 `cursor_sdk`。`when.active` 可限制规则只在本机某个时段/星期生效，省略则一直生效。反向规则 `exclude: true` 用于排除某类文件：命中后不入账、不触发其它规则。默认仍记录全部变化；`watch.record_all: false` 时只记录命中正向规则的文件。
 
 用户用自然语言描述规则时，由 Agent 改 YAML，先 `validate` 再对运行中的实例 `reload`（不必停掉守护进程）。`watch.path` / `recursive` 变更仍需重启。网页「监听规则」里的口语生成走 LLM，需先在设置页填写兼容 OpenAI 的 API Key。
 
@@ -104,7 +105,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 python .cursor/skills/file-watch/scripts/filewatch_cli.py serve --port 8765
 ```
 
-浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。首页按监听目录列出任务；详情里可以看文件变化（可读文本会显示行级 `+N / −M`，可展开增减行），也可以在「监听规则」里手动添加或用自然语言生成规则。口语会调用 LLM，请先打开「设置」填写 API Key（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
+浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。首页按监听目录列出任务，名称默认为文件夹名，可在列表或详情页修改；添加目录时可关掉「默认监听全部文件变化」，任务页也可随时切换（`watch.record_all`）。详情里可以看文件变化（可按文件名或路径搜索；内容未变的修改不入列表；可读文本会显示行级 `+N / −M`，可展开增减行），也可以在「监听规则」里手动添加正向规则、排除规则，或用自然语言添加新规则（只追加，不改已有规则）。打开规则编辑后，可在表单顶部用「AI编辑」口语填入该条，确认后再保存。口语会调用 LLM，请先打开「设置」填写 API Key（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。事件入账去抖、行级快照等待（默认 30 秒）和最大文件（默认 256KB）也在设置页修改，保存后应用到已有任务。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
 
 改前端后在 `web/` 下构建，产物写入 `scripts/filewatch/webui/`：
 

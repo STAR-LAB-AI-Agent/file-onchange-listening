@@ -11,14 +11,19 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from filewatch.llm import test_llm_connection
-from filewatch.models import EVENT_TYPES
+from filewatch.models import DEFAULT_DEBOUNCE_MS, DEFAULT_LINE_DIFF_MAX_BYTES, DEFAULT_LINE_DIFF_QUIET_MS, EVENT_TYPES
 from filewatch.service import (
+    apply_edit_rule_from_text,
     apply_rules_from_text,
+    apply_watch_timing,
     describe_watcher,
     list_watcher_payloads,
+    preview_edit_rule_from_text,
     preview_rules_from_text,
     read_stream,
+    rename_watcher,
     save_rules,
+    save_watch_options,
     start_path,
     stop_watch,
     store_for,
@@ -111,6 +116,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             ts_from = _str_arg(query, "ts_from")
             ts_to = _str_arg(query, "ts_to")
             event_type = _str_arg(query, "type")
+            path_query = _str_arg(query, "q")
             if event_type == "all":
                 event_type = None
             if event_type and event_type not in EVENT_TYPES:
@@ -127,8 +133,23 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                 ts_from=ts_from,
                 ts_to=ts_to,
                 event_type=event_type,
+                path_query=path_query,
             )
             self._json(200 if payload.get("ok") else 400, payload)
+            return
+        self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        body = self._read_json_body()
+        if isinstance(body, dict) and body.get("ok") is False and body.get("error") == "bad_json":
+            self._json(400, body)
+            return
+        data = body if isinstance(body, dict) else {}
+        match = re.fullmatch(r"/api/watchers/([^/]+)", path)
+        if match:
+            self._handle_rename(match.group(1), data)
             return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
 
@@ -153,11 +174,26 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             if watch_id is not None and not isinstance(watch_id, str):
                 self._json(400, {"ok": False, "error": "bad_request", "message": "id 必须是字符串"})
                 return
+            name = data.get("name")
+            if name is not None and not isinstance(name, str):
+                self._json(400, {"ok": False, "error": "bad_request", "message": "name 必须是字符串"})
+                return
             recursive = data.get("recursive", True)
             if not isinstance(recursive, bool):
                 self._json(400, {"ok": False, "error": "bad_request", "message": "recursive 必须是布尔值"})
                 return
-            payload = start_path(folder, watch_id=watch_id, recursive=recursive, reuse=True)
+            record_all = data.get("record_all", True)
+            if not isinstance(record_all, bool):
+                self._json(400, {"ok": False, "error": "bad_request", "message": "record_all 必须是布尔值"})
+                return
+            payload = start_path(
+                folder,
+                watch_id=watch_id,
+                name=name,
+                recursive=recursive,
+                record_all=record_all,
+                reuse=True,
+            )
             code = 200 if payload.get("ok") else 400
             if payload.get("error") == "not_found":
                 code = 404
@@ -173,6 +209,10 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, stop_watch(watch_id))
             return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/rules/(\d+)/from-text", path)
+        if match:
+            self._handle_edit_rule_from_text(match.group(1), int(match.group(2)), data)
+            return
         match = re.fullmatch(r"/api/watchers/([^/]+)/rules/from-text", path)
         if match:
             self._handle_rules_from_text(match.group(1), data)
@@ -180,6 +220,10 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         match = re.fullmatch(r"/api/watchers/([^/]+)/rules", path)
         if match:
             self._handle_save_rules(match.group(1), data)
+            return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/rename", path)
+        if match:
+            self._handle_rename(match.group(1), data)
             return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
 
@@ -193,11 +237,27 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         data = body if isinstance(body, dict) else {}
         if path == "/api/settings":
             payload = save_settings(data)
+            if payload.get("ok") and isinstance(data.get("watch"), dict):
+                timing = payload.get("watch") or {}
+                applied = apply_watch_timing(
+                    int(timing.get("debounce_ms", DEFAULT_DEBOUNCE_MS)),
+                    int(timing.get("line_diff_quiet_ms", DEFAULT_LINE_DIFF_QUIET_MS)),
+                    int(timing.get("line_diff_max_bytes", DEFAULT_LINE_DIFF_MAX_BYTES)),
+                )
+                payload["applied_watchers"] = applied.get("watchers") or []
             self._json(200 if payload.get("ok") else 400, payload)
+            return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/watch", path)
+        if match:
+            self._handle_save_watch(match.group(1), data)
             return
         match = re.fullmatch(r"/api/watchers/([^/]+)/rules", path)
         if match:
             self._handle_save_rules(match.group(1), data)
+            return
+        match = re.fullmatch(r"/api/watchers/([^/]+)", path)
+        if match:
+            self._handle_rename(match.group(1), data)
             return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
 
@@ -206,6 +266,37 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
             return
         payload = save_rules(watch_id, data.get("rules"))
+        code = 200 if payload.get("ok") else 400
+        if payload.get("error") == "not_found":
+            code = 404
+        self._json(code, payload)
+
+    def _handle_save_watch(self, watch_id: str, data: dict[str, Any]) -> None:
+        if not ID_RE.fullmatch(watch_id):
+            self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
+            return
+        if "record_all" not in data:
+            self._json(400, {"ok": False, "error": "bad_request", "message": "必须提供 record_all"})
+            return
+        record_all = data.get("record_all")
+        if not isinstance(record_all, bool):
+            self._json(400, {"ok": False, "error": "bad_request", "message": "record_all 必须是布尔值"})
+            return
+        payload = save_watch_options(watch_id, record_all=record_all)
+        code = 200 if payload.get("ok") else 400
+        if payload.get("error") == "not_found":
+            code = 404
+        self._json(code, payload)
+
+    def _handle_rename(self, watch_id: str, data: dict[str, Any]) -> None:
+        if not ID_RE.fullmatch(watch_id):
+            self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
+            return
+        name = data.get("name", data.get("title"))
+        if name is None:
+            self._json(400, {"ok": False, "error": "bad_request", "message": "必须提供 name"})
+            return
+        payload = rename_watcher(watch_id, name)
         code = 200 if payload.get("ok") else 400
         if payload.get("error") == "not_found":
             code = 404
@@ -220,17 +311,38 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "bad_request", "message": "必须提供 text"})
             return
         mode = data.get("mode")
-        if mode is not None and mode not in {"append", "replace"}:
-            self._json(400, {"ok": False, "error": "bad_request", "message": "mode 必须是 append 或 replace"})
+        if mode is not None and mode != "append":
+            self._json(400, {"ok": False, "error": "bad_request", "message": "自然语言生成只支持添加新规则"})
             return
         apply = data.get("apply", False)
         if not isinstance(apply, bool):
             self._json(400, {"ok": False, "error": "bad_request", "message": "apply 必须是布尔值"})
             return
         if apply:
-            payload = apply_rules_from_text(watch_id, text, mode=mode)
+            payload = apply_rules_from_text(watch_id, text)
         else:
-            payload = preview_rules_from_text(watch_id, text, mode=mode)
+            payload = preview_rules_from_text(watch_id, text)
+        code = 200 if payload.get("ok") else 400
+        if payload.get("error") == "not_found":
+            code = 404
+        self._json(code, payload)
+
+    def _handle_edit_rule_from_text(self, watch_id: str, index: int, data: dict[str, Any]) -> None:
+        if not ID_RE.fullmatch(watch_id):
+            self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
+            return
+        text = data.get("text")
+        if not isinstance(text, str):
+            self._json(400, {"ok": False, "error": "bad_request", "message": "必须提供 text"})
+            return
+        apply = data.get("apply", False)
+        if not isinstance(apply, bool):
+            self._json(400, {"ok": False, "error": "bad_request", "message": "apply 必须是布尔值"})
+            return
+        if apply:
+            payload = apply_edit_rule_from_text(watch_id, index, text)
+        else:
+            payload = preview_edit_rule_from_text(watch_id, index, text)
         code = 200 if payload.get("ok") else 400
         if payload.get("error") == "not_found":
             code = 404

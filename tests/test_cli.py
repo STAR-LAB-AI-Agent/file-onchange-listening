@@ -46,12 +46,27 @@ def test_init_and_test_rule(tmp_path: Path) -> None:
     )
     assert code == 0
     assert "any-file-change" in payload["matched"]
+    assert payload["excluded"] == []
     code, payload = _run(
         tmp_path / "home",
         ["test-rule", "--config", str(tmp_path / "watch.yaml"), "--path", str(target), "--type", "deleted"],
     )
     assert code == 0
     assert payload["matched"] == []
+    yaml_text = (tmp_path / "watch.yaml").read_text(encoding="utf-8")
+    yaml_text = yaml_text.replace(
+        "rules:",
+        "rules:\n  - name: skip-md\n    exclude: true\n    when:\n      glob: '**/*.md'\n",
+        1,
+    )
+    (tmp_path / "watch.yaml").write_text(yaml_text, encoding="utf-8")
+    code, payload = _run(
+        tmp_path / "home",
+        ["test-rule", "--config", str(tmp_path / "watch.yaml"), "--path", str(target), "--type", "created"],
+    )
+    assert code == 0
+    assert payload["matched"] == []
+    assert "skip-md" in payload["excluded"]
 
 
 def test_init_exists_requires_force(tmp_path: Path) -> None:
@@ -121,6 +136,17 @@ def test_list_wait_ack_status_and_ambiguous(tmp_path: Path, monkeypatch) -> None
     assert code == 0
     assert payload["watch_id"] == "alpha"
     assert payload["event_count"] == 1
+    assert payload["title"] == "alpha"
+
+    code, payload = _run(home, ["rename", "--id", "alpha", "--name", "甲任务"])
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["title"] == "甲任务"
+    assert payload["watch_id"] == "alpha"
+
+    code, payload = _run(home, ["status", "--id", "alpha"])
+    assert code == 0
+    assert payload["title"] == "甲任务"
 
     code, payload = _run(home, ["stop", "--id", "alpha"])
     assert code == 0
@@ -143,6 +169,18 @@ def test_start_missing_path_and_already_running(tmp_path: Path, monkeypatch) -> 
     assert code == 0
     assert payload["already_running"] is True
     assert payload["applied"] is False
+
+
+def test_start_match_rules_only_flag() -> None:
+    from filewatch.cli import build_parser
+    from filewatch.config import config_from_path
+
+    ns = build_parser().parse_args(["start", "--path", "x", "--match-rules-only"])
+    assert ns.match_rules_only is True
+    default = build_parser().parse_args(["start", "--path", "x"])
+    assert default.match_rules_only is False
+    config = config_from_path(".", record_all=False)
+    assert config.watch.record_all is False
 
 
 def test_no_watchers_requires_id(tmp_path: Path) -> None:

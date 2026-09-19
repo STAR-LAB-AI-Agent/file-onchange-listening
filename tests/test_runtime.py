@@ -187,6 +187,104 @@ def _live_config(inbox: Path, **watch: object) -> dict:
     }
 
 
+def test_unchanged_modified_is_not_recorded(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    note = inbox / "note.txt"
+    note.write_text("same\n", encoding="utf-8")
+    store = WatchStore("live", root=tmp_path / "state")
+    runtime = WatchRuntime(parse_config_dict(_live_config(inbox)), store)
+    try:
+        runtime._on_coalesced(
+            FileEvent(
+                id="evt_c",
+                ts=utc_now(),
+                watch_id="live",
+                type="created",
+                path=str(note),
+                is_dir=False,
+            )
+        )
+        runtime._on_coalesced(
+            FileEvent(
+                id="evt_m1",
+                ts=utc_now(),
+                watch_id="live",
+                type="modified",
+                path=str(note),
+                is_dir=False,
+            )
+        )
+        items, _ = store.read_since("events", 0)
+        assert [item["id"] for item in items] == ["evt_c"]
+        jobs, _ = store.read_since("jobs", 0)
+        assert all((job.get("event") or {}).get("id") != "evt_m1" for job in jobs)
+
+        note.write_text("same\nchanged\n", encoding="utf-8")
+        runtime._on_coalesced(
+            FileEvent(
+                id="evt_m2",
+                ts=utc_now(),
+                watch_id="live",
+                type="modified",
+                path=str(note),
+                is_dir=False,
+            )
+        )
+        items, _ = store.read_since("events", 0)
+        assert [item["id"] for item in items] == ["evt_c", "evt_m2"]
+    finally:
+        runtime.stop()
+
+
+def test_unchanged_modified_uses_disk_snapshot(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    note = inbox / "note.txt"
+    note.write_text("keep\n", encoding="utf-8")
+    store = WatchStore("live", root=tmp_path / "state")
+    first = WatchRuntime(parse_config_dict(_live_config(inbox, line_diff_quiet_ms=1)), store)
+    try:
+        first._on_coalesced(
+            FileEvent(
+                id="evt_c",
+                ts=utc_now(),
+                watch_id="live",
+                type="created",
+                path=str(note),
+                is_dir=False,
+            )
+        )
+        deadline = time.time() + 3
+        settled = False
+        while time.time() < deadline:
+            items, _ = store.read_since("events", 0)
+            if items and items[0].get("line_changes", {}).get("kind") == "text":
+                settled = True
+                break
+            time.sleep(0.05)
+        assert settled
+    finally:
+        first.stop()
+
+    second = WatchRuntime(parse_config_dict(_live_config(inbox)), store)
+    try:
+        second._on_coalesced(
+            FileEvent(
+                id="evt_m",
+                ts=utc_now(),
+                watch_id="live",
+                type="modified",
+                path=str(note),
+                is_dir=False,
+            )
+        )
+        items, _ = store.read_since("events", 0)
+        assert not any(item["id"] == "evt_m" for item in items)
+    finally:
+        second.stop()
+
+
 def test_handle_raw_deleted_moved_and_ignore(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -218,6 +316,94 @@ def test_handle_raw_deleted_moved_and_ignore(tmp_path: Path) -> None:
         assert not any("noise.txt" in str(item.get("path", "")) for item in items)
         jobs, _, _ = store.wait("jobs", 0, timeout=2, limit=20)
         assert any(job.get("rule") == "any" for job in jobs)
+    finally:
+        runtime.stop()
+
+
+def test_exclude_rule_drops_events_before_mailbox(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("live", root=tmp_path / "state")
+    config = parse_config_dict(
+        {
+            "name": "live",
+            "watch": {"path": str(inbox), "ignore": ["**/.git/**"], "debounce_ms": 1},
+            "rules": [
+                {"name": "skip-logs", "exclude": True, "when": {"glob": "**/*.log"}},
+                {
+                    "name": "any",
+                    "when": {"types": ["created", "modified", "deleted", "moved"], "glob": "**/*"},
+                    "then": [{"notify": {"message": "{{path}}"}}],
+                },
+            ],
+        }
+    )
+    runtime = WatchRuntime(config, store)
+    try:
+        runtime.handle_raw(FileCreatedEvent(str(inbox / "trace.log")))
+        runtime.handle_raw(FileCreatedEvent(str(inbox / "keep.txt")))
+        items, _, _ = store.wait("events", 0, timeout=1, limit=20)
+        paths = [str(item.get("path", "")) for item in items]
+        assert any(path.endswith("keep.txt") for path in paths)
+        assert not any(path.endswith("trace.log") for path in paths)
+        jobs, _, _ = store.wait("jobs", 0, timeout=2, limit=20)
+        job_paths = [str((job.get("event") or {}).get("path", "")) for job in jobs]
+        assert any(path.endswith("keep.txt") for path in job_paths)
+        assert not any(path.endswith("trace.log") for path in job_paths)
+    finally:
+        runtime.stop()
+
+
+def test_record_all_false_drops_unmatched_files(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("live", root=tmp_path / "state")
+    config = parse_config_dict(
+        {
+            "name": "live",
+            "watch": {"path": str(inbox), "record_all": False, "debounce_ms": 1, "ignore": ["**/.git/**"]},
+            "rules": [
+                {
+                    "name": "md",
+                    "when": {"types": ["created"], "glob": "**/*.md", "is_dir": False},
+                    "then": [{"notify": {"message": "{{path}}"}}],
+                }
+            ],
+        }
+    )
+    runtime = WatchRuntime(config, store)
+    try:
+        runtime.handle_raw(FileCreatedEvent(str(inbox / "skip.txt")))
+        runtime.handle_raw(FileCreatedEvent(str(inbox / "keep.md")))
+        items, _, _ = store.wait("events", 0, timeout=1, limit=20)
+        paths = [str(item.get("path", "")) for item in items]
+        assert any(path.endswith("keep.md") for path in paths)
+        assert not any(path.endswith("skip.txt") for path in paths)
+        jobs, _, _ = store.wait("jobs", 0, timeout=2, limit=20)
+        job_paths = [str((job.get("event") or {}).get("path", "")) for job in jobs]
+        assert any(path.endswith("keep.md") for path in job_paths)
+        assert not any(path.endswith("skip.txt") for path in job_paths)
+    finally:
+        runtime.stop()
+
+
+def test_record_all_false_without_rules_records_nothing(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("live", root=tmp_path / "state")
+    config = parse_config_dict(
+        {
+            "name": "live",
+            "watch": {"path": str(inbox), "record_all": False, "debounce_ms": 1},
+            "rules": [],
+        }
+    )
+    runtime = WatchRuntime(config, store)
+    try:
+        runtime.handle_raw(FileCreatedEvent(str(inbox / "any.txt")))
+        items, _, timed_out = store.wait("events", 0, timeout=0.4, limit=20)
+        assert timed_out
+        assert items == []
     finally:
         runtime.stop()
 

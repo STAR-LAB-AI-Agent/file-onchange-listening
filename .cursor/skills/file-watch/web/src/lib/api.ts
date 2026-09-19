@@ -73,6 +73,7 @@ export type RuleWhen = {
 export type WatchRule = {
   name: string
   enabled?: boolean
+  exclude?: boolean
   when?: RuleWhen
   then?: RuleThen[]
 }
@@ -83,7 +84,10 @@ export type WatchConfig = {
   watch?: {
     path?: string
     recursive?: boolean
+    record_all?: boolean
     debounce_ms?: number
+    line_diff_quiet_ms?: number
+    line_diff_max_bytes?: number
     ignore?: string[]
   }
 }
@@ -94,6 +98,8 @@ export type WatcherInfo = {
   title?: string
   running?: boolean
   path?: string | null
+  recursive?: boolean
+  record_all?: boolean
   event_count?: number
   rule_count?: number
   rules?: string[]
@@ -117,6 +123,8 @@ export type GeneratedRulesResponse = Omit<WatcherInfo, "rules"> & {
   rules?: WatchRule[]
   merged_rules?: WatchRule[]
   generated?: WatchRule[]
+  index?: number
+  rule?: WatchRule
 }
 
 export const TYPE_LABEL: Record<string, string> = {
@@ -180,10 +188,28 @@ export function formatActive(raw: RuleWhen["active"] | undefined): string {
   return dayText || timeText
 }
 
-export function blankRule(): WatchRule {
+export function blankRule(exclude = false): WatchRule {
+  if (exclude) {
+    return {
+      name: "",
+      enabled: true,
+      exclude: true,
+      when: {
+        types: ["created", "modified", "deleted", "moved"],
+        glob: [],
+        regex: null,
+        is_dir: false,
+        min_size_bytes: null,
+        cooldown_seconds: 0,
+        active: null,
+      },
+      then: [],
+    }
+  }
   return {
     name: "",
     enabled: true,
+    exclude: false,
     when: {
       types: ["created", "modified"],
       glob: ["**/*"],
@@ -223,6 +249,13 @@ export function formatEventTime(ts: string | undefined) {
   const date = new Date(ts)
   if (Number.isNaN(date.getTime())) return ts
   return CST_FORMAT.format(date)
+}
+
+export function defaultTaskTitle(path?: string | null, fallback = "") {
+  if (!path) return fallback
+  const trimmed = path.replace(/[\\/]+$/, "")
+  const parts = trimmed.split(/[/\\]/)
+  return parts[parts.length - 1] || fallback
 }
 
 export function relPath(path: string | undefined, root: string | undefined) {
@@ -315,9 +348,16 @@ export type DingTalkChannel = {
   interval_seconds?: number
 }
 
+export type WatchTimingSettings = {
+  debounce_ms?: number
+  line_diff_quiet_ms?: number
+  line_diff_max_bytes?: number
+}
+
 export type AppSettings = {
   llm: LlmSettings
   dingtalk?: { channels?: DingTalkChannel[] }
+  watch?: WatchTimingSettings
 }
 
 export function dingtalkSelection(ding: NotifyAction["dingtalk"] | undefined): string {

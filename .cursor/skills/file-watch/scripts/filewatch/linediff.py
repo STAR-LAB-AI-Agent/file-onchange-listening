@@ -8,7 +8,9 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-MAX_FILE_BYTES = 256 * 1024
+from filewatch.models import DEFAULT_LINE_DIFF_MAX_BYTES
+
+MAX_FILE_BYTES = DEFAULT_LINE_DIFF_MAX_BYTES
 NUL_PROBE_BYTES = 8 * 1024
 MAX_CHANGE_ROWS = 80
 MAX_LINE_CHARS = 200
@@ -49,13 +51,47 @@ def decode_bytes(raw: bytes) -> tuple[str, str] | None:
     return None
 
 
-def read_text_file(path: Path) -> tuple[dict[str, Any] | None, str | None, str | None]:
+def content_fingerprint(path: Path, *, max_bytes: int = MAX_FILE_BYTES) -> str | None:
+    """Stable identity for skip-if-unchanged. None if the file cannot be read."""
+    skipped, text, _encoding = read_text_file(path, max_bytes=max_bytes)
+    if skipped is None and text is not None:
+        return "t:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    try:
+        if not path.is_file():
+            return None
+        stat = path.stat()
+        if stat.st_size > max_bytes:
+            mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+            return f"m:{stat.st_size}:{mtime_ns}"
+        return "b:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def snapshot_fingerprint(snapshots_dir: Path, path: str | Path) -> str | None:
+    baseline = load_snapshot(snapshots_dir, path)
+    if baseline is None:
+        return None
+    return "t:" + hashlib.sha256(baseline.encode("utf-8")).hexdigest()
+
+
+def is_noop_text_modified(record: dict[str, Any]) -> bool:
+    """True when a modified event settled to zero line changes."""
+    if record.get("type") != "modified":
+        return False
+    payload = record.get("line_changes")
+    if not isinstance(payload, dict) or payload.get("kind") != "text":
+        return False
+    return int(payload.get("added") or 0) == 0 and int(payload.get("removed") or 0) == 0
+
+
+def read_text_file(path: Path, *, max_bytes: int = MAX_FILE_BYTES) -> tuple[dict[str, Any] | None, str | None, str | None]:
     """Return (skipped_payload, text, encoding)."""
     try:
         if not path.exists() or path.is_dir():
             return {"kind": "skipped", "reason": "unreadable"}, None, None
         size = path.stat().st_size
-        if size > MAX_FILE_BYTES:
+        if size > max_bytes:
             return {"kind": "skipped", "reason": "too_large"}, None, None
         raw = path.read_bytes()
     except OSError:
@@ -165,6 +201,7 @@ def settle_line_changes(
     path: str,
     old_path: str | None,
     is_dir: bool,
+    max_bytes: int = MAX_FILE_BYTES,
 ) -> dict[str, Any] | None:
     """Compute final line_changes for a coalesced quiet-window event.
 
@@ -187,7 +224,7 @@ def settle_line_changes(
     if event_type == "moved" and old_path:
         move_snapshot(snapshots_dir, old_path, path)
 
-    skipped, text, encoding = read_text_file(Path(path))
+    skipped, text, encoding = read_text_file(Path(path), max_bytes=max_bytes)
     if skipped is not None:
         return skipped
     assert text is not None

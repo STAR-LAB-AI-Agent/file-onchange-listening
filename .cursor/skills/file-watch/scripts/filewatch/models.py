@@ -147,6 +147,7 @@ class Rule:
     when: When = field(default_factory=When)
     then: tuple[Action, ...] = ()
     enabled: bool = True
+    exclude: bool = False
 
 
 DEFAULT_IGNORE = (
@@ -156,15 +157,20 @@ DEFAULT_IGNORE = (
     "**/venv/**",
     "**/*.tmp",
 )
+DEFAULT_DEBOUNCE_MS = 400
+DEFAULT_LINE_DIFF_QUIET_MS = 30_000
+DEFAULT_LINE_DIFF_MAX_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
 class WatchSettings:
     path: str
     recursive: bool = True
-    debounce_ms: int = 400
-    line_diff_quiet_ms: int = 2000
+    debounce_ms: int = DEFAULT_DEBOUNCE_MS
+    line_diff_quiet_ms: int = DEFAULT_LINE_DIFF_QUIET_MS
+    line_diff_max_bytes: int = DEFAULT_LINE_DIFF_MAX_BYTES
     ignore: tuple[str, ...] = DEFAULT_IGNORE
+    record_all: bool = True
 
 
 @dataclass(frozen=True)

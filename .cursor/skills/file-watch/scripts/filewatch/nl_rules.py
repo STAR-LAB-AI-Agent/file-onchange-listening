@@ -9,26 +9,42 @@ from filewatch.config import ConfigError, parse_config_dict
 from filewatch.llm import LlmError, chat_complete
 from filewatch.paths import sanitize_id
 
-SYSTEM_PROMPT = """你是 filewatch 规则编译器。把用户口语转成 JSON，只输出一个 JSON 对象，不要 markdown。
-格式：
-{"mode":"append"|"replace","notes":["中文说明"],"warnings":[],"rules":[{
-  "name":"小写短横线英文id","enabled":true,
+RULE_JSON_SHAPE = """{
+  "name":"小写短横线英文id","enabled":true,"exclude":false,
   "when":{"types":["created"],"glob":["**/*.md"],"regex":null,"is_dir":false,"min_size_bytes":null,"cooldown_seconds":0,"active":null},
   "then":[{"notify":{"title":"...","message":"{{type}}: {{path}}","webhook":null,"mailbox":true,"dingtalk":null}}]
-}]}
-约束：
-- when.types 只能是 created / modified / deleted / moved
+}"""
+
+FIELD_CONSTRAINTS = """- when.types 只能是 created / modified / deleted / moved
 - 递归 glob 写 **/*.ext，不要只写 *.ext
 - 用户指定生效时段时写 when.active：{"start":"09:00","end":"18:00","days":["mon","tue","wed","thu","fri"]}。未指定则 active 为 null（一直生效）。days 用 mon–sun；结束早于开始表示跨天。不要写时区。
-- 用户没说任务要求/启动智能体/处理文件时，then 只含 notify
+- 用户说不监听/排除/忽略某类文件（反向规则）时：exclude=true，then 必须是 []，when.glob 或 regex 必填（如 ["**/*.log"]）。未指定事件类型时 types 用全部四种。不要写 notify/agent。默认仍监听全部文件，只有反向规则命中的路径才不入账。
+- 用户没说任务要求/启动智能体/处理文件时，正向规则 then 只含 notify
 - 用户提到钉钉/群机器人时，notify.dingtalk 设为 true（用设置页默认渠道）；指定了渠道名或 id 则写 {"channel":"id"}。不要把 webhook/secret 写进规则
 - 钉钉是按分钟汇总推送，不要改成即时 webhook
 - 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null}}
 - agent.runner 默认 builtin（调用设置页 LLM）；高级用法才用 command（须 command 字符串数组）或 cursor_sdk
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
-- 未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false
-- 未指定时段时不要写 active，或写 null
-- 用户说替换/覆盖/只要这些时 mode=replace，否则 append
+- 正向规则未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false
+- 未指定时段时不要写 active，或写 null"""
+
+SYSTEM_PROMPT = f"""你是 filewatch 规则编译器。把用户口语转成 JSON，只输出一个 JSON 对象，不要 markdown。
+格式：
+{{"notes":["中文说明"],"warnings":[],"rules":[{RULE_JSON_SHAPE}]}}
+约束：
+- 只生成要新增的规则，不要修改、删除或替换已有规则
+{FIELD_CONSTRAINTS}
+"""
+
+EDIT_SYSTEM_PROMPT = f"""你是 filewatch 规则编辑器。根据用户指令修改当前这一条规则，只输出一个 JSON 对象，不要 markdown。
+格式：
+{{"notes":["中文说明"],"warnings":[],"rule":{RULE_JSON_SHAPE}}}
+约束：
+- 必须返回完整 rule，只改用户提到的部分，其余字段原样保留
+- 不要新增其它规则，也不要删除当前规则；用户说停用则 enabled=false
+- 用户说改成不监听/排除时：exclude=true，then 必须是 []
+- 用户说改回通知/任务时：exclude=false，并补全 then
+{FIELD_CONSTRAINTS}
 """
 
 
@@ -40,6 +56,19 @@ def _unique_name(base: str, taken: set[str]) -> str:
     while f"{slug}-{index}" in taken:
         index += 1
     return f"{slug}-{index}"
+
+
+def _dingtalk_hint() -> str:
+    try:
+        from filewatch.settings import load_dingtalk_channels
+
+        ding_channels = load_dingtalk_channels()
+    except Exception:  # noqa: BLE001
+        ding_channels = ()
+    if ding_channels:
+        listing = "、".join(f"{item.id}（{item.name}）" for item in ding_channels)
+        return f"可用钉钉渠道：{listing}。用户说钉钉且未指定渠道时 dingtalk=true。"
+    return "尚未配置钉钉渠道；用户说钉钉时仍可写 dingtalk=true，并在 notes 提醒去设置页添加机器人。"
 
 
 def try_parse_structured_rules(text: str) -> list[dict[str, Any]] | None:
@@ -63,9 +92,11 @@ def try_parse_structured_rules(text: str) -> list[dict[str, Any]] | None:
         return None
     if isinstance(raw, list):
         rules = raw
+    elif isinstance(raw, dict) and isinstance(raw.get("rule"), dict):
+        rules = [raw["rule"]]
     elif isinstance(raw, dict) and isinstance(raw.get("rules"), list):
         rules = raw["rules"]
-    elif isinstance(raw, dict) and "name" in raw and "then" in raw:
+    elif isinstance(raw, dict) and "name" in raw and ("then" in raw or raw.get("exclude")):
         rules = [raw]
     else:
         return None
@@ -96,25 +127,28 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise ConfigError("LLM 输出不是 JSON 对象")
 
 
+def _list_notes(payload: dict[str, Any], key: str) -> list[str]:
+    raw = payload.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw]
+
+
 def _normalize_generated(
     payload: dict[str, Any],
     *,
     existing_names: list[str],
-    mode: str | None,
 ) -> dict[str, Any]:
     rules_raw = payload.get("rules")
     if not isinstance(rules_raw, list) or not rules_raw:
         raise ConfigError("LLM 没有返回规则")
-    resolved_mode = mode or str(payload.get("mode") or "append")
-    if resolved_mode not in {"append", "replace"}:
-        resolved_mode = "append"
     taken = set(existing_names)
     rules: list[dict[str, Any]] = []
     for item in rules_raw:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "rule")
-        unique = _unique_name(name, taken) if resolved_mode != "replace" else sanitize_id(name)
+        unique = _unique_name(name, taken)
         taken.add(unique)
         copied = dict(item)
         copied["name"] = unique
@@ -122,14 +156,48 @@ def _normalize_generated(
     if not rules:
         raise ConfigError("LLM 没有返回有效规则")
     parse_config_dict({"name": "preview", "watch": {"path": "."}, "rules": rules})
-    notes = payload.get("notes") if isinstance(payload.get("notes"), list) else []
-    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     return {
         "ok": True,
-        "mode": resolved_mode,
+        "mode": "append",
         "rules": rules,
-        "notes": [str(item) for item in notes],
-        "warnings": [str(item) for item in warnings],
+        "notes": _list_notes(payload, "notes"),
+        "warnings": _list_notes(payload, "warnings"),
+    }
+
+
+def _normalize_edited_rule(
+    payload: dict[str, Any],
+    *,
+    current: dict[str, Any],
+    other_names: list[str],
+) -> dict[str, Any]:
+    rule_raw = payload.get("rule")
+    extra_rules = 0
+    if not isinstance(rule_raw, dict):
+        rules_raw = payload.get("rules")
+        if isinstance(rules_raw, list) and rules_raw and isinstance(rules_raw[0], dict):
+            rule_raw = rules_raw[0]
+            extra_rules = max(len(rules_raw) - 1, 0)
+        else:
+            raise ConfigError("LLM 没有返回规则")
+    elif isinstance(payload.get("rules"), list):
+        extra_rules = max(len(payload["rules"]) - 1, 0)
+    copied = dict(rule_raw)
+    current_name = str(current.get("name") or "rule")
+    requested = str(copied.get("name") or current_name)
+    if requested == current_name:
+        copied["name"] = current_name
+    else:
+        copied["name"] = _unique_name(requested, set(other_names))
+    parse_config_dict({"name": "preview", "watch": {"path": "."}, "rules": [copied]})
+    warnings = _list_notes(payload, "warnings")
+    if extra_rules:
+        warnings.append("只应用了第一条规则，编辑不会新增其它规则")
+    return {
+        "ok": True,
+        "rule": copied,
+        "notes": _list_notes(payload, "notes"),
+        "warnings": warnings,
     }
 
 
@@ -140,6 +208,7 @@ def rules_from_text(
     mode: str | None = None,
     complete: Callable[[str, str], str] | None = None,
 ) -> dict[str, Any]:
+    del mode
     stripped = (text or "").strip()
     if not stripped:
         return {"ok": False, "error": "empty_text", "message": "请输入规则描述"}
@@ -149,31 +218,68 @@ def rules_from_text(
     except ConfigError as exc:
         return {"ok": False, "error": "bad_config", "message": str(exc)}
     if structured is not None:
-        dummy = {"mode": mode or "append", "notes": ["已把输入解析为 YAML/JSON 规则"], "warnings": [], "rules": structured}
+        dummy = {"notes": ["已把输入解析为 YAML/JSON 规则"], "warnings": [], "rules": structured}
         try:
-            return _normalize_generated(dummy, existing_names=taken, mode=mode or "append")
+            return _normalize_generated(dummy, existing_names=taken)
         except ConfigError as exc:
             return {"ok": False, "error": "bad_config", "message": str(exc)}
 
     names = "、".join(taken) if taken else "（无）"
-    try:
-        from filewatch.settings import load_dingtalk_channels
-
-        ding_channels = load_dingtalk_channels()
-    except Exception:  # noqa: BLE001
-        ding_channels = ()
-    if ding_channels:
-        listing = "、".join(f"{item.id}（{item.name}）" for item in ding_channels)
-        ding_hint = f"可用钉钉渠道：{listing}。用户说钉钉且未指定渠道时 dingtalk=true。"
-    else:
-        ding_hint = "尚未配置钉钉渠道；用户说钉钉时仍可写 dingtalk=true，并在 notes 提醒去设置页添加机器人。"
-    user = f"已有规则名：{names}\n{ding_hint}\n用户指定 mode：{mode or '未指定'}\n用户描述：\n{stripped}"
+    ding_hint = _dingtalk_hint()
+    user = f"已有规则名：{names}（不要修改这些规则，只新增）\n{ding_hint}\n用户描述：\n{stripped}"
     complete_fn = complete or chat_complete
     try:
         raw = complete_fn(SYSTEM_PROMPT, user)
         payload = extract_json_object(raw)
-        result = _normalize_generated(payload, existing_names=taken, mode=mode)
+        result = _normalize_generated(payload, existing_names=taken)
         result["notes"] = ["由 LLM 生成", *result["notes"]]
+        return result
+    except LlmError as exc:
+        return {"ok": False, "error": exc.error, "message": exc.message}
+    except (ConfigError, json.JSONDecodeError, ValueError) as exc:
+        return {"ok": False, "error": "bad_config", "message": f"LLM 输出无法校验：{exc}"}
+
+
+def edit_rule_from_text(
+    text: str,
+    *,
+    current: dict[str, Any],
+    existing_names: list[str] | None = None,
+    complete: Callable[[str, str], str] | None = None,
+) -> dict[str, Any]:
+    stripped = (text or "").strip()
+    if not stripped:
+        return {"ok": False, "error": "empty_text", "message": "请输入修改说明"}
+    current_name = str(current.get("name") or "")
+    other_names = [name for name in (existing_names or []) if name != current_name]
+    try:
+        structured = try_parse_structured_rules(stripped)
+    except ConfigError as exc:
+        return {"ok": False, "error": "bad_config", "message": str(exc)}
+    if structured is not None:
+        dummy = {
+            "notes": ["已把输入解析为 YAML/JSON 规则"],
+            "warnings": [],
+            "rule": structured[0],
+            "rules": structured,
+        }
+        try:
+            return _normalize_edited_rule(dummy, current=current, other_names=other_names)
+        except ConfigError as exc:
+            return {"ok": False, "error": "bad_config", "message": str(exc)}
+
+    others = "、".join(other_names) if other_names else "（无）"
+    ding_hint = _dingtalk_hint()
+    user = (
+        f"当前规则：\n{json.dumps(current, ensure_ascii=False)}\n"
+        f"其它已有规则名：{others}\n{ding_hint}\n用户指令：\n{stripped}"
+    )
+    complete_fn = complete or chat_complete
+    try:
+        raw = complete_fn(EDIT_SYSTEM_PROMPT, user)
+        payload = extract_json_object(raw)
+        result = _normalize_edited_rule(payload, current=current, other_names=other_names)
+        result["notes"] = ["由 LLM 编辑", *result["notes"]]
         return result
     except LlmError as exc:
         return {"ok": False, "error": exc.error, "message": exc.message}
@@ -184,16 +290,7 @@ def rules_from_text(
 def merge_rules(
     existing: list[dict[str, Any]],
     generated: list[dict[str, Any]],
-    mode: str,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
-    if mode == "replace":
-        return list(generated)
-    by_name = {str(item.get("name")): index for index, item in enumerate(existing)}
-    merged = list(existing)
-    for rule in generated:
-        name = str(rule.get("name"))
-        if name in by_name:
-            merged[by_name[name]] = rule
-        else:
-            merged.append(rule)
-    return merged
+    del mode
+    return [*existing, *generated]

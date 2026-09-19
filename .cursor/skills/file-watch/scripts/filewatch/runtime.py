@@ -25,7 +25,13 @@ from watchdog.observers import Observer
 from filewatch.actions import ActionRunner
 from filewatch.config import ConfigError, config_to_dict, parse_config_dict, summarize_config
 from filewatch.debounce import Debouncer
-from filewatch.linediff import put_line_changes, settle_line_changes
+from filewatch.linediff import (
+    content_fingerprint,
+    path_key,
+    put_line_changes,
+    settle_line_changes,
+    snapshot_fingerprint,
+)
 from filewatch.matching import path_is_ignored
 from filewatch.models import EVENT_TYPES, Config, FileEvent
 from filewatch.rules import RuleEngine
@@ -93,6 +99,8 @@ class WatchRuntime:
         self._line_diff_lock = threading.Lock()
         # path -> latest event waiting for line-diff settlement
         self._pending_line_diff: dict[str, FileEvent] = {}
+        self._fp_lock = threading.Lock()
+        self._content_fp: dict[str, str] = {}
 
     def start(self) -> None:
         if not self.root.exists() or not self.root.is_dir():
@@ -161,7 +169,7 @@ class WatchRuntime:
             self.debouncer.set_delay_ms(config.watch.debounce_ms)
             self.line_diff_debouncer.set_delay_ms(config.watch.line_diff_quiet_ms)
             self.config = Config(
-                name=self.config.name,
+                name=config.name,
                 watch=config.watch,
                 rules=config.rules,
                 max_parallel_jobs=old_parallel,
@@ -178,13 +186,6 @@ class WatchRuntime:
         try:
             generation, pending = self.store.read_pending_config()
             config = parse_config_dict(pending, source=pending.get("source"))
-            config = Config(
-                name=self.config.name,
-                watch=config.watch,
-                rules=config.rules,
-                max_parallel_jobs=config.max_parallel_jobs,
-                source=config.source,
-            )
             result = self.apply_reload(config)
             self.store.config_path.write_text(
                 json.dumps(config_to_dict(self.config), ensure_ascii=False, indent=2),
@@ -306,9 +307,73 @@ class WatchRuntime:
             old_path=old_path,
             is_dir=is_dir,
         )
+        with self._config_lock:
+            if self.engine.exclude_hits(event):
+                return
+            if not self.config.watch.record_all and not self.engine.selector_hits(event):
+                return
         self.debouncer.push(event)
 
+    def _remember_fingerprint(self, key: str, fingerprint: str | None) -> None:
+        if not fingerprint:
+            return
+        with self._fp_lock:
+            self._content_fp[key] = fingerprint
+
+    def _forget_fingerprint(self, key: str) -> None:
+        with self._fp_lock:
+            self._content_fp.pop(key, None)
+
+    def _lookup_fingerprint(self, key: str, path: str) -> str | None:
+        with self._fp_lock:
+            cached = self._content_fp.get(key)
+        if cached is not None:
+            return cached
+        snap = snapshot_fingerprint(self.store.text_snapshots_dir, path)
+        if snap is not None:
+            self._remember_fingerprint(key, snap)
+        return snap
+
+    def _line_diff_max_bytes(self) -> int:
+        with self._config_lock:
+            return self.config.watch.line_diff_max_bytes
+
+    def _drop_unchanged_modified(self, event: FileEvent) -> bool:
+        """OS modified fires on timestamp/attribute touches; skip if bytes did not change."""
+        if event.is_dir or event.type != "modified":
+            return False
+        current = content_fingerprint(Path(event.path), max_bytes=self._line_diff_max_bytes())
+        if current is None:
+            return False
+        key = path_key(event.path)
+        previous = self._lookup_fingerprint(key, event.path)
+        if previous == current:
+            return True
+        self._remember_fingerprint(key, current)
+        return False
+
+    def _update_content_fingerprint(self, event: FileEvent) -> None:
+        if event.is_dir:
+            return
+        key = path_key(event.path)
+        if event.type == "deleted":
+            self._forget_fingerprint(key)
+            return
+        if event.type == "moved" and event.old_path:
+            old_key = path_key(event.old_path)
+            with self._fp_lock:
+                old_fp = self._content_fp.pop(old_key, None)
+            current = content_fingerprint(Path(event.path), max_bytes=self._line_diff_max_bytes())
+            self._remember_fingerprint(key, current or old_fp)
+            return
+        if event.type == "created":
+            self._remember_fingerprint(key, content_fingerprint(Path(event.path), max_bytes=self._line_diff_max_bytes()))
+
     def _on_coalesced(self, event: FileEvent) -> None:
+        if self._drop_unchanged_modified(event):
+            log.debug("skip unchanged modified %s", event.path)
+            return
+        self._update_content_fingerprint(event)
         enriched = self._with_pending_line_changes(event)
         self.store.append("events", enriched.to_dict())
         log.info("event %s %s", enriched.type, enriched.path)
@@ -366,6 +431,7 @@ class WatchRuntime:
             path=event.path,
             old_path=event.old_path,
             is_dir=event.is_dir,
+            max_bytes=self._line_diff_max_bytes(),
         )
         if payload is None:
             return

@@ -59,6 +59,21 @@ def _put(url: str, payload: dict) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def _patch(url: str, payload: dict) -> tuple[int, dict]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="PATCH",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
 def test_web_page_lists_seeded_events(tmp_path: Path, monkeypatch) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("FILEWATCH_HOME", str(home))
@@ -169,6 +184,19 @@ def test_web_lists_tasks_and_isolates_events(tmp_path: Path, monkeypatch) -> Non
         assert by_id["inbox"]["last_event"]["id"] == "evt_inbox"
         assert by_id["reports"]["last_event"]["id"] == "evt_reports"
 
+        status, data = _patch(
+            f"http://127.0.0.1:{port}/api/watchers/inbox",
+            {"name": "收件箱"},
+        )
+        assert status == 200, data
+        assert data["ok"] is True
+        assert data["title"] == "收件箱"
+        assert data["watch_id"] == "inbox"
+        status, payload = _get(f"http://127.0.0.1:{port}/api/watchers")
+        assert status == 200
+        by_id = {item["watch_id"]: item for item in payload["watchers"]}
+        assert by_id["inbox"]["title"] == "收件箱"
+
         status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?tail=1")
         assert status == 200
         assert [item["id"] for item in data["items"]] == ["evt_inbox"]
@@ -221,6 +249,10 @@ def test_web_events_page_and_time_range(tmp_path: Path, monkeypatch) -> None:
         status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&ts_from=not-a-date")
         assert status == 400
         assert data["error"] == "bad_request"
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&q=B.TXT")
+        assert status == 200
+        assert [item["id"] for item in data["items"]] == ["e2"]
+        assert data["total"] == 1
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -265,6 +297,36 @@ def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> N
         assert status == 200, payload
         assert payload["rules"][0]["name"] == "from-yaml"
         assert payload["rules"][0]["when"]["glob"] == ["**/*.md"]
+
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules/from-text",
+            {
+                "text": "- name: skip-logs\n  exclude: true\n  when:\n    glob: ['**/*.log']\n",
+                "apply": True,
+            },
+        )
+        assert status == 200, payload
+        assert payload["config"]["rules"][0]["name"] == "skip-logs"
+        assert payload["config"]["rules"][0]["exclude"] is True
+        assert payload["config"]["rules"][0]["then"] == []
+
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules/0/from-text",
+            {
+                "text": "- name: skip-logs\n  exclude: true\n  when:\n    glob: ['**/*.tmp']\n",
+                "apply": True,
+            },
+        )
+        assert status == 200, payload
+        assert payload["config"]["rules"][0]["when"]["glob"] == ["**/*.tmp"]
+        assert len(payload["config"]["rules"]) == 1
+
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules/9/from-text",
+            {"text": "改一下", "apply": False},
+        )
+        assert status == 400
+        assert payload["error"] == "bad_request"
 
         status, payload = _post(
             f"http://127.0.0.1:{port}/api/watchers/inbox/rules",
@@ -392,7 +454,18 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
     inbox.mkdir()
     _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
 
-    def fake_complete(_system: str, _user: str) -> str:
+    def fake_complete(system: str, _user: str) -> str:
+        if "规则编辑器" in system:
+            return json.dumps(
+                {
+                    "notes": ["edited"],
+                    "rule": {
+                        "name": "created-md",
+                        "when": {"types": ["created", "modified"], "glob": ["**/*.txt"], "is_dir": False},
+                        "then": [{"notify": {"title": "t", "message": "{{filename}}"}}],
+                    },
+                }
+            )
         return json.dumps(
             {
                 "mode": "append",
@@ -418,6 +491,9 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
         status, payload = _get(f"http://127.0.0.1:{port}/api/settings")
         assert status == 200
         assert payload["llm"]["api_key_set"] is False
+        assert payload["watch"]["debounce_ms"] == 400
+        assert payload["watch"]["line_diff_quiet_ms"] == 30_000
+        assert payload["watch"]["line_diff_max_bytes"] == 256 * 1024
         status, payload = _put(
             f"http://127.0.0.1:{port}/api/settings",
             {"llm": {"api_key": "sk-test-key-9999", "model": "demo", "base_url": "https://example.invalid/v1"}},
@@ -431,6 +507,16 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
         )
         assert status == 200, payload
         assert payload["config"]["rules"][0]["when"]["glob"] == ["**/*.md"]
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules/0/from-text",
+            {"text": "改成匹配 txt，并加上修改事件", "apply": True},
+        )
+        assert status == 200, payload
+        rule = payload["config"]["rules"][0]
+        assert rule["name"] == "created-md"
+        assert rule["when"]["glob"] == ["**/*.txt"]
+        assert rule["when"]["types"] == ["created", "modified"]
+        assert len(payload["config"]["rules"]) == 1
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -464,6 +550,12 @@ def test_web_health_and_invalid_requests(tmp_path: Path, monkeypatch) -> None:
         assert status == 400
         assert payload["error"] == "bad_id"
         status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/inbox/rules/from-text", {})
+        assert status == 400
+        assert payload["error"] == "bad_request"
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules/from-text",
+            {"text": "新建 markdown", "apply": False, "mode": "replace"},
+        )
         assert status == 400
         assert payload["error"] == "bad_request"
         status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/nope/rules", {"rules": []})
@@ -538,6 +630,68 @@ def test_web_save_rules_reloads_running(tmp_path: Path, monkeypatch) -> None:
         thread.join(timeout=2)
         runtime.debouncer.close()
         runtime.actions.close(wait=False)
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_saves_watch_timing_to_existing_task(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _put(
+            f"http://127.0.0.1:{port}/api/settings",
+            {"watch": {"debounce_ms": 180, "line_diff_quiet_ms": 45000, "line_diff_max_bytes": 512000}},
+        )
+        assert status == 200, payload
+        assert payload["watch"]["debounce_ms"] == 180
+        assert payload["watch"]["line_diff_quiet_ms"] == 45000
+        assert payload["watch"]["line_diff_max_bytes"] == 512000
+        assert payload["applied_watchers"][0]["watch_id"] == "inbox"
+        status, config = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
+        assert status == 200
+        assert config["config"]["watch"]["debounce_ms"] == 180
+        assert config["config"]["watch"]["line_diff_quiet_ms"] == 45000
+        assert config["config"]["watch"]["line_diff_max_bytes"] == 512000
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_save_watch_record_all(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _get(f"http://127.0.0.1:{port}/api/watchers")
+        assert status == 200
+        assert payload["watchers"][0]["record_all"] is True
+        status, payload = _put(f"http://127.0.0.1:{port}/api/watchers/inbox/watch", {"record_all": False})
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert payload["record_all"] is False
+        status, config = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/config")
+        assert status == 200
+        assert config["config"]["watch"]["record_all"] is False
+        status, payload = _put(f"http://127.0.0.1:{port}/api/watchers/inbox/watch", {})
+        assert status == 400
+        assert payload["error"] == "bad_request"
+        status, payload = _put(f"http://127.0.0.1:{port}/api/watchers/inbox/watch", {"record_all": "no"})
+        assert status == 400
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/start",
+            {"path": str(inbox), "record_all": "yes"},
+        )
+        assert status == 400
+        assert payload["error"] == "bad_request"
+    finally:
         httpd.shutdown()
         httpd.server_close()
 

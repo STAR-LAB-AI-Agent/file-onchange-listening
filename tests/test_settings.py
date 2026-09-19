@@ -6,6 +6,7 @@ from filewatch.models import DingTalkRef
 from filewatch.settings import (
     load_dingtalk_channels,
     load_llm_config,
+    load_watch_timing,
     mask_secret,
     public_settings,
     resolve_dingtalk,
@@ -174,3 +175,38 @@ def test_resolve_dingtalk_missing_channel(tmp_path: Path, monkeypatch) -> None:
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
         assert "找不到钉钉渠道" in str(exc)
+
+
+def test_watch_timing_defaults_and_save(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    public = public_settings()
+    assert public["watch"]["debounce_ms"] == 400
+    assert public["watch"]["line_diff_quiet_ms"] == 30_000
+    assert public["watch"]["line_diff_max_bytes"] == 256 * 1024
+    timing = load_watch_timing()
+    assert timing.debounce_ms == 400
+    assert timing.line_diff_quiet_ms == 30_000
+    assert timing.line_diff_max_bytes == 256 * 1024
+    result = save_settings({"watch": {"debounce_ms": 250, "line_diff_quiet_ms": 12_000, "line_diff_max_bytes": 1024}})
+    assert result["ok"] is True
+    assert result["watch"]["debounce_ms"] == 250
+    assert result["watch"]["line_diff_quiet_ms"] == 12_000
+    assert result["watch"]["line_diff_max_bytes"] == 1024
+    save_settings({"llm": {"model": "kept", "base_url": "https://api.example/v1"}})
+    again = load_watch_timing()
+    assert again.debounce_ms == 250
+    assert again.line_diff_quiet_ms == 12_000
+    assert again.line_diff_max_bytes == 1024
+    assert load_llm_config().model == "kept"
+
+
+def test_watch_timing_rejects_negative(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    result = save_settings({"watch": {"debounce_ms": -1}})
+    assert result["ok"] is False
+    assert result["error"] == "bad_request"
+    result = save_settings({"watch": {"line_diff_quiet_ms": "nope"}})
+    assert result["ok"] is False
+    result = save_settings({"watch": {"line_diff_max_bytes": 0}})
+    assert result["ok"] is False

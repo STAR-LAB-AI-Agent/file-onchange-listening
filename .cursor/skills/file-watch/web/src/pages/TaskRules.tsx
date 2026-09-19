@@ -14,10 +14,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   TYPE_LABEL,
   ApiError,
@@ -42,10 +42,11 @@ export function TaskRules({ watchId }: { watchId: string }) {
   const [stopping, setStopping] = useState(false)
   const [saving, setSaving] = useState(false)
   const [nl, setNl] = useState("")
-  const [mode, setMode] = useState("append")
+  const [aiEdit, setAiEdit] = useState("")
+  const [aiNotes, setAiNotes] = useState<string[]>([])
   const [notes, setNotes] = useState<string[]>([])
   const [preview, setPreview] = useState<WatchRule[] | null>(null)
-  const [editor, setEditor] = useState<{ index: number | null; rule: WatchRule } | null>(null)
+  const [editor, setEditor] = useState<{ index: number | null; rule: WatchRule; rev: number } | null>(null)
   const [keySet, setKeySet] = useState<boolean | null>(null)
   const [channels, setChannels] = useState<DingTalkChannel[]>([])
 
@@ -126,7 +127,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
       const data = await api<GeneratedRulesResponse>(`/api/watchers/${encodeURIComponent(watchId)}/rules/from-text`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: nl, apply, mode }),
+        body: JSON.stringify({ text: nl, apply }),
       })
       setNotes([...(data.notes || []), ...(data.warnings || []), data.message].filter(Boolean) as string[])
       if (apply) {
@@ -140,6 +141,46 @@ export function TaskRules({ watchId }: { watchId: string }) {
         setKeySet(false)
       }
       setError(err instanceof Error ? err.message : "生成失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function openEditor(index: number | null, rule: WatchRule) {
+    setAiEdit("")
+    setAiNotes([])
+    setEditor({ index, rule, rev: 0 })
+  }
+
+  async function applyAiEdit() {
+    if (!editor) return
+    const text = aiEdit.trim()
+    if (!text) return
+    setSaving(true)
+    setError(null)
+    try {
+      const path =
+        editor.index == null
+          ? `/api/watchers/${encodeURIComponent(watchId)}/rules/from-text`
+          : `/api/watchers/${encodeURIComponent(watchId)}/rules/${editor.index}/from-text`
+      const data = await api<GeneratedRulesResponse>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, apply: false }),
+      })
+      const nextRule = editor.index == null ? data.rules?.[0] || data.rule : data.rule || data.rules?.[0]
+      if (!nextRule) {
+        setError("没有生成规则")
+        return
+      }
+      setEditor({ index: editor.index, rule: nextRule, rev: editor.rev + 1 })
+      setAiNotes([...(data.notes || []), ...(data.warnings || [])].filter(Boolean) as string[])
+      setAiEdit("")
+    } catch (err) {
+      if (err instanceof ApiError && err.code === "llm_not_configured") {
+        setKeySet(false)
+      }
+      setError(err instanceof Error ? err.message : "编辑失败")
     } finally {
       setSaving(false)
     }
@@ -170,15 +211,17 @@ export function TaskRules({ watchId }: { watchId: string }) {
       stopping={stopping}
       onStart={() => void startWatch()}
       onStop={() => void stopWatch()}
+      onRenamed={(data) => setInfo((current) => ({ ...current, ...data }))}
+      onRenameError={setError}
     >
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <SparklesIcon className="size-4" />
-            自然语言生成
+            自然语言添加规则
           </CardTitle>
           <CardDescription>
-            口语由 LLM 转成规则，例如「新建或修改 markdown 时通知我，30 秒内不要重复」。也可直接粘贴 YAML/JSON，不调用模型。
+            口语由 LLM 转成新规则并追加，不会改已有规则。例如「新建或修改 markdown 时通知我，30 秒内不要重复」，或「不要监听 log 文件」。修改某条请点「编辑」，在表单顶部用「AI编辑」。也可直接粘贴 YAML/JSON，不调用模型。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
@@ -199,22 +242,13 @@ export function TaskRules({ watchId }: { watchId: string }) {
             rows={4}
             placeholder="删除图片后发通知；再加一条：所有 txt 变化写入邮箱"
           />
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="grid gap-1.5">
-              <Label>写入方式</Label>
-              <ToggleGroup type="single" variant="outline" size="sm" value={mode} onValueChange={(value) => value && setMode(value)}>
-                <ToggleGroupItem value="append">追加</ToggleGroupItem>
-                <ToggleGroupItem value="replace">替换全部</ToggleGroupItem>
-              </ToggleGroup>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => void generate(false)} disabled={saving || !nl.trim()}>
-                生成预览
-              </Button>
-              <Button onClick={() => void generate(true)} disabled={saving || !nl.trim()}>
-                生成并保存
-              </Button>
-            </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" onClick={() => void generate(false)} disabled={saving || !nl.trim()}>
+              生成预览
+            </Button>
+            <Button onClick={() => void generate(true)} disabled={saving || !nl.trim()}>
+              生成并保存
+            </Button>
           </div>
           {notes.length ? (
             <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
@@ -228,7 +262,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
               <div className="mb-2 font-medium">将生成 {preview.length} 条规则</div>
               {preview.map((rule) => (
                 <div key={rule.name} className="font-mono text-xs text-muted-foreground">
-                  {rule.name} · {(rule.when?.types || []).join("/")} · {(rule.when?.glob || []).join(", ")}
+                  {rule.name} · {rule.exclude ? "排除" : (rule.when?.types || []).join("/")} · {(rule.when?.glob || []).join(", ")}
                 </div>
               ))}
               <Button
@@ -253,13 +287,26 @@ export function TaskRules({ watchId }: { watchId: string }) {
         </CardHeader>
         <CardContent className="flex flex-col gap-3 p-4">
           <div>
-            <Button size="sm" onClick={() => setEditor({ index: null, rule: blankRule() })}>
+            <Button size="sm" onClick={() => openEditor(null, blankRule())}>
               <PlusIcon data-icon="inline-start" />
               手动添加
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="ml-2"
+              onClick={() => openEditor(null, blankRule(true))}
+            >
+              <PlusIcon data-icon="inline-start" />
+              添加排除规则
+            </Button>
           </div>
           {rules.length === 0 ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">还没有规则。命中规则后会写入 jobs 邮箱。</div>
+            <div className="py-10 text-center text-sm text-muted-foreground">
+              {info?.record_all === false
+                ? "还没有规则。当前只记录命中正向规则的文件，添加规则后才会出现文件变化。"
+                : "还没有规则。默认会记录全部文件变化。添加排除规则可停止监听某类文件；正向规则命中后写入 jobs 邮箱。"}
+            </div>
           ) : (
             <div className="flex flex-col gap-3">
               {rules.map((rule, index) => {
@@ -272,12 +319,18 @@ export function TaskRules({ watchId }: { watchId: string }) {
                       <Badge variant={rule.enabled === false ? "secondary" : "default"}>
                         {rule.enabled === false ? "停用" : "启用"}
                       </Badge>
-                      {(rule.then || []).map((action, actionIndex) => (
-                        <Badge key={actionIndex} variant="outline">
-                          {action.notify ? "notify" : "agent"}
+                      {rule.exclude ? (
+                        <Badge variant="outline" className="border-rose-300 text-rose-700 dark:border-rose-800 dark:text-rose-400">
+                          排除
                         </Badge>
-                      ))}
-                      {(rule.then || []).some((action) => hasDingtalk(action.notify)) ? (
+                      ) : (
+                        (rule.then || []).map((action, actionIndex) => (
+                          <Badge key={actionIndex} variant="outline">
+                            {action.notify ? "通知" : "agent"}
+                          </Badge>
+                        ))
+                      )}
+                      {rule.exclude ? null : (rule.then || []).some((action) => hasDingtalk(action.notify)) ? (
                         <Badge variant="outline">钉钉</Badge>
                       ) : null}
                     </div>
@@ -311,7 +364,7 @@ export function TaskRules({ watchId }: { watchId: string }) {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => setEditor({ index, rule })}
+                      onClick={() => openEditor(index, rule)}
                     >
                       <PencilIcon data-icon="inline-start" />
                       编辑
@@ -337,23 +390,82 @@ export function TaskRules({ watchId }: { watchId: string }) {
         </CardContent>
       </Card>
 
-      <Dialog open={!!editor} onOpenChange={(open) => !open && setEditor(null)}>
+      <Dialog
+        open={!!editor}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditor(null)
+            setAiEdit("")
+            setAiNotes([])
+          }
+        }}
+      >
         <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl">
           <DialogHeader className="shrink-0">
-            <DialogTitle>{editor?.index == null ? "添加规则" : "编辑规则"}</DialogTitle>
-            <DialogDescription>各输入框下方有说明和示例。模板可用 {"{{path}}"} {"{{type}}"} {"{{filename}}"}。</DialogDescription>
+            <DialogTitle>{editor?.index == null ? (editor?.rule.exclude ? "添加排除规则" : "添加规则") : "编辑规则"}</DialogTitle>
+            <DialogDescription>
+              {editor?.rule.exclude
+                ? "排除规则命中后不再监听该类文件，也不会触发其它规则。"
+                : '各输入框下方有说明和示例。模板可用 {{path}} {{type}} {{filename}}。'}
+            </DialogDescription>
           </DialogHeader>
           {editor ? (
-            <div className="min-h-0 overflow-y-auto pr-1">
-              <RuleForm
-                key={`${editor.index}-${editor.rule.name}`}
-                initial={editor.rule}
-                channels={channels}
-                submitting={saving}
-                onSubmit={upsertRule}
-                onCancel={() => setEditor(null)}
-              />
-            </div>
+            <>
+              <div className="shrink-0 grid gap-1.5 border-b pb-3">
+                <Label htmlFor="rule-ai-edit">AI编辑</Label>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <Input
+                    id="rule-ai-edit"
+                    value={aiEdit}
+                    onChange={(event) => setAiEdit(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                        event.preventDefault()
+                        void applyAiEdit()
+                      }
+                    }}
+                    placeholder="用自然语言改这条规则，例如：改成只匹配 markdown，冷却 30 秒"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    onClick={() => void applyAiEdit()}
+                    disabled={saving || !aiEdit.trim()}
+                  >
+                    <SparklesIcon data-icon="inline-start" />
+                    应用
+                  </Button>
+                </div>
+                {error ? <p className="text-sm text-destructive">{error}</p> : null}
+                {keySet === false ? (
+                  <p className="text-xs text-muted-foreground">
+                    请先在设置页填写 API Key。粘贴 YAML 或 JSON 不受影响。
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    应用后会填入下方表单，确认无误再点保存。也可粘贴 YAML/JSON。
+                  </p>
+                )}
+                {aiNotes.length ? (
+                  <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+                    {aiNotes.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+              <div className="min-h-0 overflow-y-auto pr-1">
+                <RuleForm
+                  key={`${editor.index}-${editor.rev}`}
+                  initial={editor.rule}
+                  channels={channels}
+                  submitting={saving}
+                  onSubmit={upsertRule}
+                  onCancel={() => setEditor(null)}
+                />
+              </div>
+            </>
           ) : null}
         </DialogContent>
       </Dialog>

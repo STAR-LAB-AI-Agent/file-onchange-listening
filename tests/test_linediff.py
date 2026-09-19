@@ -7,11 +7,14 @@ from filewatch.linediff import (
     MAX_FILE_BYTES,
     MAX_LINE_CHARS,
     build_line_changes,
+    content_fingerprint,
+    is_noop_text_modified,
     load_line_changes_map,
     merge_line_changes,
     put_line_changes,
     read_text_file,
     settle_line_changes,
+    snapshot_fingerprint,
 )
 
 
@@ -48,6 +51,14 @@ def test_read_text_file_skips_binary_and_large(tmp_path: Path) -> None:
     huge.write_bytes(b"a" * (MAX_FILE_BYTES + 1))
     skipped, _, _ = read_text_file(huge)
     assert skipped == {"kind": "skipped", "reason": "too_large"}
+
+    modest = tmp_path / "modest.txt"
+    modest.write_bytes(b"a" * 50)
+    skipped, text, _ = read_text_file(modest, max_bytes=40)
+    assert skipped == {"kind": "skipped", "reason": "too_large"}
+    skipped, text, _ = read_text_file(modest, max_bytes=50)
+    assert skipped is None
+    assert text == "a" * 50
 
 
 def test_settle_created_modified_deleted(tmp_path: Path) -> None:
@@ -104,6 +115,30 @@ def test_settle_dir_omits(tmp_path: Path) -> None:
     assert (
         settle_line_changes(snaps, event_type="created", path=str(folder), old_path=None, is_dir=True)
         is None
+    )
+
+
+def test_content_fingerprint_and_noop_modified(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("hello\n", encoding="utf-8")
+    first = content_fingerprint(target)
+    assert first is not None and first.startswith("t:")
+    assert content_fingerprint(target) == first
+    target.write_text("hello\nworld\n", encoding="utf-8")
+    assert content_fingerprint(target) != first
+
+    snaps = tmp_path / "snaps"
+    settle_line_changes(snaps, event_type="created", path=str(target), old_path=None, is_dir=False)
+    assert snapshot_fingerprint(snaps, target) == content_fingerprint(target)
+
+    assert is_noop_text_modified(
+        {"type": "modified", "line_changes": {"kind": "text", "added": 0, "removed": 0}}
+    )
+    assert not is_noop_text_modified(
+        {"type": "created", "line_changes": {"kind": "text", "added": 0, "removed": 0}}
+    )
+    assert not is_noop_text_modified(
+        {"type": "modified", "line_changes": {"kind": "text", "added": 1, "removed": 0}}
     )
 
 

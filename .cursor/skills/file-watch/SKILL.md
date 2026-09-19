@@ -9,7 +9,7 @@ description: >-
 
 # 文件监听
 
-版本 **2.1.0**。
+版本 **2.1.1**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 
@@ -38,10 +38,12 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 ```text
 1. list（按 path 对上已有实例）
    - 已有 → 记下 watch_id 和 home，读 home/config.json 当底稿
-     （保留其 watch.path / recursive / debounce_ms / line_diff_quiet_ms / ignore 和全部旧规则）
+     （保留其 watch.path / recursive / debounce_ms / line_diff_quiet_ms / line_diff_max_bytes / ignore / record_all 和全部旧规则）
    - 没有 → 再 init 或新建 watch.yaml
 2. 把自然语言合并进这份配置的 rules（追加则留旧规则；用户说替换才清空）。
    用户提到工作日/周末/几点到几点/上班时间等 → 写 when.active；没说时段则省略（一直生效）。
+   用户说不监听/排除/忽略某类文件 → 写 `exclude: true`，then 为空，glob 如 `**/*.log`。
+   用户说不要默认监听全部、只听规则指定的文件 → 写 `watch.record_all: false`。
    若要推钉钉：先按「钉钉推送」写入 settings.json 的渠道，规则里只引用渠道，不要写 webhook。
 3. python scripts/filewatch_cli.py validate --config <这份文件>
 4. ok: false → 根据 message 改配置，再 validate，不要 reload / start
@@ -51,19 +53,20 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 6. 向用户确认已生效的规则名
 ```
 
-对已有路径**禁止** `start --path`：那会用空规则覆盖 `config.json`。热更新只换规则、忽略列表和去抖间隔。`watch.path` 或 `recursive` 变了会返回 `needs_restart`：先 `stop`，再 `start --config` 同一份配置。已在运行时不要再 `start`（不会应用新配置）。
+对已有路径**禁止** `start --path`：那会用空规则覆盖 `config.json`。热更新只换规则、忽略列表、去抖间隔和 `record_all`。`watch.path` 或 `recursive` 变了会返回 `needs_restart`：先 `stop`，再 `start --config` 同一份配置。已在运行时不要再 `start`（不会应用新配置）。
 
 写规则时：
 
 - 递归匹配用 `**/*.md`，不要只写 `*.md`。
 - `when.types` 只能是 `created` / `modified` / `deleted` / `moved`。
 - 用户提到生效时段、工作日、周末、几点到几点、上班时间、晚上才通知时，写 `when.active`（本机本地时间，不要写时区）。工作日 `days: [mon, tue, wed, thu, fri]`，周末 `[sat, sun]`。没说时段则省略 `active`，不要自行编造。`end` 早于 `start` 表示跨天（如 `22:00`–`06:00`）。也可写成 `active: "09:00-18:00"`。
-- `then` 每项只能是 `notify` 或 `agent` 之一。
+- `then` 每项只能是 `notify` 或 `agent` 之一。反向规则 `exclude: true` 时 `then` 必须为空。
 - 模板变量只能用 `{{path}}` `{{filename}}` `{{type}}` `{{watch_id}}` `{{ts}}` `{{old_path}}` `{{json}}` `{{rule}}`。
 - 用户没说启动智能体/任务要求时，默认只写 `notify`（写入 jobs 邮箱）。
 - 用户要按文件变化执行任务时，写 `agent.runner: builtin`，把任务要求放进 `prompt`；会调用设置页 LLM，带 Read/Glob/Grep/Write/Bash/PowerShell 工具循环。
 - 高级用法仍可用 `command` / `cursor_sdk`。
 - 用户要推到钉钉群时，**不要**把 Webhook/SEC 写进规则 YAML。先写入设置里的 `dingtalk.channels`（见「钉钉推送」），规则只写 `notify.dingtalk: true` 或 `{channel: 渠道id}`。命中后每分钟汇总一次，不要写成即时 `notify.webhook`。
+- 用户说不监听、排除、忽略某类文件时，写反向规则：`exclude: true`，`then` 为空，`when.glob` 如 `**/*.log`。命中后该文件不会进入 events，也不会触发其它规则。默认仍记录全部文件（另有 `watch.ignore` 默认忽略 `.git` / `*.tmp` 等）。用户说不要默认监听全部、添加规则后才听指定文件时，写 `watch.record_all: false`：没有正向规则则不入账，有规则则只记录 glob/类型能对上的文件。
 - 热更新时保留原来的 `watch.path` / `recursive`，除非用户明确要改监听目录。
 
 ## 流程
@@ -97,6 +100,7 @@ python scripts/filewatch_cli.py validate --config examples/watch.yaml
 python scripts/filewatch_cli.py start --config examples/watch.yaml
 python scripts/filewatch_cli.py reload --config examples/watch.yaml --id inbox
 python scripts/filewatch_cli.py start --path D:/data/inbox --id inbox
+python scripts/filewatch_cli.py start --path D:/data/inbox --id inbox --match-rules-only
 python scripts/filewatch_cli.py start --config "%LOCALAPPDATA%/filewatch/inbox/config.json" --id inbox
 python scripts/filewatch_cli.py status --id inbox
 python scripts/filewatch_cli.py wait --id inbox --stream jobs --timeout 30
@@ -104,6 +108,7 @@ python scripts/filewatch_cli.py drain --id inbox --stream events
 python scripts/filewatch_cli.py ack --id inbox --stream jobs --cursor 128
 python scripts/filewatch_cli.py stop --id inbox
 python scripts/filewatch_cli.py list
+python scripts/filewatch_cli.py rename --id inbox --name 收件箱
 python scripts/filewatch_cli.py serve --port 8765
 ```
 
@@ -113,7 +118,15 @@ python scripts/filewatch_cli.py serve --port 8765
 
 ## 已有实例
 
-网页和 CLI 共用状态目录。`list` / `status` 的 JSON 含 `watch_id`、`path`、`running`、`home`、`rules`（仅规则名）。完整配置在 `home/config.json`（JSON，可直接当 `--config`）。`--id` 必须用 `list` 里的 `watch_id`，不要用配置里的 `name`（同名目录可能带哈希后缀）。
+网页和 CLI 共用状态目录。`list` / `status` 的 JSON 含 `watch_id`、`title`（显示名，默认文件夹名）、`path`、`running`、`record_all`、`home`、`rules`（仅规则名）。完整配置在 `home/config.json`（JSON，可直接当 `--config`）。`--id` 必须用 `list` 里的 `watch_id`，不要用配置里的 `name`（`name` 是可改的显示名；同名目录可能带哈希后缀）。
+
+改任务显示名：
+
+```bash
+python scripts/filewatch_cli.py rename --id <watch_id> --name 新名称
+```
+
+空名称会恢复为文件夹名。`watch_id` 不变。网页列表和详情页的铅笔按钮同样可以改。
 
 改规则（与网页「监听规则」同等）：
 
@@ -181,11 +194,11 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 ## 网页
 
-在本机打开任务面板。首页按监听目录列出任务；详情分「文件变化」和「监听规则」：
+在本机打开任务面板。首页按监听目录列出任务，名称默认为文件夹名、可改；详情分「文件变化」和「监听规则」：
 
-- 文件变化：该目录的新建 / 修改 / 删除 / 移动；可读文本在安静 `line_diff_quiet_ms`（默认 2 秒）后显示行级 `+N / −M`，可展开查看增减行
-- 监听规则：手动添加（任务要求非空即 builtin 智能体；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
-- 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key，以及钉钉群机器人（名称、Webhook、SEC）。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`。规则里不要再写钉钉 webhook
+- 文件变化：该目录的新建 / 修改 / 删除 / 移动；可按文件名或路径搜索，并与类型、时间筛选一起用。内容未变的 `modified`（仅时间戳/属性、编辑器空保存等）不入列表。可读文本在安静 `line_diff_quiet_ms`（默认 30 秒，可在设置页改）后显示行级 `+N / −M`，可展开查看增减行。添加目录时可关掉「默认监听全部文件变化」，之后也可在任务页切换；关掉后只记录命中正向规则的文件
+- 监听规则：手动添加（任务要求非空即 builtin 智能体；也可添加反向规则排除某类文件；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言添加新规则（只追加，不改已有规则；调用 LLM；也可粘贴 YAML/JSON，不经模型）。打开规则编辑后，可在表单顶部用自然语言由 AI 填入该条，确认后再保存。已运行则热更新，未运行则写入配置等下次 start
+- 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key，钉钉群机器人（名称、Webhook、SEC），以及事件入账去抖、行级快照等待和最大文件。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`。规则里不要再写钉钉 webhook
 
 用户要打开面板时：
 
@@ -210,7 +223,9 @@ watch:
   path: D:/data/inbox
   recursive: true
   debounce_ms: 400
-  line_diff_quiet_ms: 2000
+  line_diff_quiet_ms: 30000
+  line_diff_max_bytes: 262144
+  # record_all: false   # 仅记录命中正向规则的文件；省略或 true 则默认记录全部变化
   ignore: ["**/.git/**", "**/__pycache__/**", "**/*.tmp"]
 rules:
   - name: new-markdown
@@ -236,9 +251,15 @@ rules:
             本次触发：{{type}} {{path}}
           timeout_seconds: 600
           max_steps: 24
+  - name: skip-logs
+    exclude: true
+    when:
+      glob: "**/*.log"
 ```
 
 `when` 字段：`types`、`glob`（字符串或列表）、`regex`、`is_dir`、`min_size_bytes`、`cooldown_seconds`、`active`。
+
+反向规则设 `exclude: true`，`then` 必须为空，且必须有 `glob` 或 `regex`。命中后不写入 events、不触发其它规则。省略 `types` 时排除全部事件类型。`watch.record_all` 省略或 `true` 时仍记录全部未排除的文件；设为 `false` 后只记录命中正向规则（glob / 类型 / is_dir）的文件，没有正向规则则不入账。`watch.ignore` 是更底层的忽略列表，三者独立。
 
 `active` 按**本机本地时间**限制规则何时可命中。省略、`null` 或空对象表示一直生效。
 
@@ -285,7 +306,7 @@ stop
 
 没有配置规则时，改为 `wait --stream events`。
 
-`events` 流里，可读文本文件会附带 `line_changes`（行级增删）。事件仍按 `watch.debounce_ms`（默认 400ms）入账；行级快照另等 `watch.line_diff_quiet_ms`（默认 2000ms）该文件无新事件后再结算，结果按 `event_id` 合并进读取。规则匹配仍按文件级，不读行内容。二进制 / 过大 / 尚无基线时为 `kind: skipped`。结算前可能是 `kind: pending`。
+`events` 流里，可读文本文件会附带 `line_changes`（行级增删）。事件仍按 `watch.debounce_ms`（默认 400ms）入账；若 `modified` 的内容与上次指纹或行级快照相同，则不写入 events、也不触发规则（操作系统仍可能因时间戳/属性发出 modified）。行级快照另等 `watch.line_diff_quiet_ms`（默认 30000ms / 30 秒）该文件无新事件后再结算，结果按 `event_id` 合并进读取。超过 `watch.line_diff_max_bytes`（默认 256KB）视为过大，`kind: skipped`。规则匹配仍按文件级，不读行内容。二进制 / 尚无基线时同样为 `skipped`。结算前可能是 `kind: pending`。入账去抖、快照等待和最大文件也可在设置页修改，保存后应用到已有任务。
 
 先 `status` / `list`，已有同类 watcher 就复用，不要对同一路径再开一个守护进程。改规则先读 `home/config.json` 再 `reload`；未运行则 `start --config` 该配置。不要对已有路径 `start --path`。
 

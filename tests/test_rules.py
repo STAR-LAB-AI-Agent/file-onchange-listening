@@ -218,6 +218,109 @@ def test_duplicate_name_empty_then_and_bad_filters() -> None:
         )
 
 
+def test_exclude_rule_drops_matching_and_keeps_others(tmp_path: Path) -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {"name": "skip-logs", "exclude": True, "when": {"glob": "**/*.log"}},
+                {"name": "any", "when": {"types": ["created"], "glob": "**/*"}, "then": [{"notify": {}}]},
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    log_event = _event(tmp_path, "trace.log")
+    md_event = _event(tmp_path, "note.md")
+    assert [rule.name for rule in engine.exclude_hits(log_event)] == ["skip-logs"]
+    assert engine.matches(log_event) == []
+    assert engine.exclude_hits(md_event) == []
+    assert [rule.name for rule in engine.matches(md_event)] == ["any"]
+    dumped = config_to_dict(config)
+    assert dumped["rules"][0]["exclude"] is True
+    assert dumped["rules"][0]["then"] == []
+    assert dumped["rules"][1]["exclude"] is False
+
+
+def test_exclude_requires_glob_or_regex_and_rejects_then() -> None:
+    with pytest.raises(ConfigError, match="glob 或 when.regex"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [{"name": "skip", "exclude": True, "when": {"types": ["created"]}}],
+            }
+        )
+    with pytest.raises(ConfigError, match="不能包含 then"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [
+                    {
+                        "name": "skip",
+                        "exclude": True,
+                        "when": {"glob": "**/*.log"},
+                        "then": [{"notify": {}}],
+                    }
+                ],
+            }
+        )
+
+
+def test_disabled_exclude_does_not_block(tmp_path: Path) -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {"name": "skip-logs", "exclude": True, "enabled": False, "when": {"glob": "**/*.log"}},
+                {"name": "any", "when": {"types": ["created"], "glob": "**/*"}, "then": [{"notify": {}}]},
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    event = _event(tmp_path, "trace.log")
+    assert engine.exclude_hits(event) == []
+    assert [rule.name for rule in engine.matches(event)] == ["any"]
+
+
+def test_record_all_defaults_true_and_rejects_non_bool(tmp_path: Path) -> None:
+    config = parse_config_dict({"name": "demo", "watch": {"path": str(tmp_path)}, "rules": []})
+    assert config.watch.record_all is True
+    dumped = config_to_dict(config)
+    assert dumped["watch"]["record_all"] is True
+    with pytest.raises(ConfigError, match="record_all"):
+        parse_config_dict({"name": "demo", "watch": {"path": str(tmp_path), "record_all": "yes"}, "rules": []})
+
+
+def test_selector_hits_ignores_active_and_cooldown(tmp_path: Path) -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path), "record_all": False},
+            "rules": [
+                {
+                    "name": "md",
+                    "when": {
+                        "types": ["created"],
+                        "glob": "**/*.md",
+                        "cooldown_seconds": 60,
+                        "active": {"start": "09:00", "end": "10:00", "days": ["mon"]},
+                    },
+                    "then": [{"notify": {}}],
+                }
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    md_event = _event(tmp_path, "note.md")
+    txt_event = _event(tmp_path, "note.txt")
+    assert [rule.name for rule in engine.selector_hits(md_event)] == ["md"]
+    assert engine.selector_hits(txt_event) == []
+    assert config_to_dict(config)["watch"]["record_all"] is False
+
+
 def test_replace_rules_drops_removed_cooldown(tmp_path: Path) -> None:
     config = parse_config_dict(
         {

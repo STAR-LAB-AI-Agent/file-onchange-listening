@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, SearchIcon, XIcon } from "lucide-react"
 
 import { TaskChrome } from "@/components/TaskChrome"
 import { Badge } from "@/components/ui/badge"
@@ -118,21 +118,36 @@ export function TaskDetail({ watchId }: { watchId: string }) {
   const [total, setTotal] = useState(0)
   const [tsFrom, setTsFrom] = useState("")
   const [tsTo, setTsTo] = useState("")
+  const [pathQuery, setPathQuery] = useState("")
+  const [pathSearch, setPathSearch] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const cursorRef = useRef(0)
 
+  useEffect(() => {
+    const next = pathQuery.trim()
+    const timer = window.setTimeout(() => {
+      setPathSearch((current) => {
+        if (current === next) return current
+        setPage(1)
+        return next
+      })
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [pathQuery])
+
   const loadPage = useCallback(async () => {
     const params = new URLSearchParams()
     params.set("page", String(page))
     params.set("page_size", String(PAGE_SIZE))
     if (filter !== "all") params.set("type", filter)
+    if (pathSearch) params.set("q", pathSearch)
     if (tsFrom) params.set("ts_from", toFromIso(tsFrom))
     if (tsTo) params.set("ts_to", toToIso(tsTo))
     return api<WatcherInfo>(`/api/watchers/${encodeURIComponent(watchId)}/events?${params.toString()}`)
-  }, [filter, page, tsFrom, tsTo, watchId])
+  }, [filter, page, pathSearch, tsFrom, tsTo, watchId])
 
   const applyPage = useCallback(
     (data: WatcherInfo) => {
@@ -213,7 +228,14 @@ export function TaskDetail({ watchId }: { watchId: string }) {
 
   const watchPath = info?.path || undefined
   const hasRange = Boolean(tsFrom || tsTo)
-  const emptyHint = hasRange || filter !== "all" ? "没有符合筛选条件的文件变化。" : "这个任务还没有文件变化。"
+  const hasFilters = hasRange || filter !== "all" || Boolean(pathSearch)
+  const emptyHint = hasFilters
+    ? "没有符合筛选条件的文件变化。"
+    : info?.record_all === false
+      ? info.rule_count
+        ? "当前只记录命中规则的文件，还没有符合规则的变化。"
+        : "当前只记录命中规则的文件。请先到「监听规则」添加规则。"
+      : "这个任务还没有文件变化。"
 
   return (
     <TaskChrome
@@ -225,28 +247,68 @@ export function TaskDetail({ watchId }: { watchId: string }) {
       stopping={stopping}
       onStart={() => void startWatch()}
       onStop={() => void stopWatch()}
+      onRenamed={(data) => setInfo((current) => ({ ...current, ...data }))}
+      onRenameError={setError}
     >
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={filter}
-            onValueChange={(value) => {
-              if (value) {
-                setFilter(value)
-                setPage(1)
-              }
-            }}
-            spacing={0}
-          >
-            {FILTERS.map((item) => (
-              <ToggleGroupItem key={item.id} value={item.id}>
-                {item.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+            <div className="grid gap-1">
+              <Label htmlFor="event-path">搜索文件</Label>
+              <div className="relative">
+                <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  id="event-path"
+                  type="text"
+                  value={pathQuery}
+                  onChange={(event) => setPathQuery(event.target.value)}
+                  placeholder="文件名或路径"
+                  className="w-full pr-8 pl-8 sm:w-64"
+                  autoComplete="off"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return
+                    event.preventDefault()
+                    const next = pathQuery.trim()
+                    setPathSearch(next)
+                    setPage(1)
+                  }}
+                />
+                {pathQuery ? (
+                  <button
+                    type="button"
+                    className="absolute top-1/2 right-1.5 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                    aria-label="清除搜索"
+                    onClick={() => {
+                      setPathQuery("")
+                      setPathSearch("")
+                      setPage(1)
+                    }}
+                  >
+                    <XIcon className="size-3.5" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={filter}
+              onValueChange={(value) => {
+                if (value) {
+                  setFilter(value)
+                  setPage(1)
+                }
+              }}
+              spacing={0}
+            >
+              {FILTERS.map((item) => (
+                <ToggleGroupItem key={item.id} value={item.id}>
+                  {item.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </div>
           <div className="flex flex-wrap items-end gap-2">
             <div className="grid gap-1">
               <Label htmlFor="event-from">从（东八区）</Label>

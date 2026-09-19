@@ -24,11 +24,18 @@ def watcher_dir(watch_id: str) -> Path:
     return watchers_root() / watch_id
 
 
-def sanitize_id(name: str) -> str:
+def slug_id(name: str) -> str | None:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-").lower()
     if not slug:
-        raise ValueError("watch id is empty after sanitizing")
+        return None
     return slug[:64]
+
+
+def sanitize_id(name: str) -> str:
+    slug = slug_id(name)
+    if not slug:
+        raise ValueError("watch id is empty after sanitizing")
+    return slug
 
 
 def to_posix(path: str | Path) -> str:

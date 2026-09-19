@@ -8,6 +8,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { api, navigate, type AppSettings, type DingTalkChannel } from "@/lib/api"
 
+const DEFAULT_DEBOUNCE_MS = 400
+const DEFAULT_LINE_DIFF_QUIET_MS = 30_000
+const DEFAULT_LINE_DIFF_MAX_BYTES = 256 * 1024
+
 type ChannelDraft = {
   key: string
   id: string
@@ -52,6 +56,9 @@ export function SettingsPage() {
   const [masked, setMasked] = useState("")
   const [keySet, setKeySet] = useState(false)
   const [channels, setChannels] = useState<ChannelDraft[]>([])
+  const [debounceMs, setDebounceMs] = useState(String(DEFAULT_DEBOUNCE_MS))
+  const [lineDiffQuietSeconds, setLineDiffQuietSeconds] = useState(String(DEFAULT_LINE_DIFF_QUIET_MS / 1000))
+  const [lineDiffMaxKb, setLineDiffMaxKb] = useState(String(DEFAULT_LINE_DIFF_MAX_BYTES / 1024))
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -60,6 +67,15 @@ export function SettingsPage() {
   channelsRef.current = channels
   const loadGen = useRef(0)
   const dingDirty = useRef(false)
+
+  function applyWatch(data: AppSettings) {
+    const debounce = data.watch?.debounce_ms
+    const quiet = data.watch?.line_diff_quiet_ms
+    const maxBytes = data.watch?.line_diff_max_bytes
+    setDebounceMs(String(debounce ?? DEFAULT_DEBOUNCE_MS))
+    setLineDiffQuietSeconds(String((quiet ?? DEFAULT_LINE_DIFF_QUIET_MS) / 1000))
+    setLineDiffMaxKb(String((maxBytes ?? DEFAULT_LINE_DIFF_MAX_BYTES) / 1024))
+  }
 
   function applyLlm(data: AppSettings) {
     setBaseUrl(data.llm.base_url || "https://api.openai.com/v1")
@@ -87,6 +103,7 @@ export function SettingsPage() {
         if (gen !== loadGen.current) return
         applyLlm(data)
         applyDingtalk(data)
+        applyWatch(data)
         setDingReady(true)
       })
       .catch((err: unknown) => {
@@ -181,6 +198,49 @@ export function SettingsPage() {
     }
   }
 
+  async function saveWatch() {
+    const debounce = Number(debounceMs)
+    const quietSeconds = Number(lineDiffQuietSeconds)
+    if (!Number.isFinite(debounce) || debounce < 0 || !Number.isInteger(debounce)) {
+      setError("事件入账间隔必须是大于等于 0 的整数毫秒")
+      return
+    }
+    if (!Number.isFinite(quietSeconds) || quietSeconds < 0) {
+      setError("行级快照等待必须大于等于 0 秒")
+      return
+    }
+    const maxKb = Number(lineDiffMaxKb)
+    if (!Number.isFinite(maxKb) || maxKb < 1 || !Number.isInteger(maxKb)) {
+      setError("行级快照最大文件必须是大于等于 1 的整数 KB")
+      return
+    }
+    const quietMs = Math.round(quietSeconds * 1000)
+    const maxBytes = maxKb * 1024
+    setSaving(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const data = await api<AppSettings & { message?: string; applied_watchers?: unknown[] }>("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          watch: {
+            debounce_ms: debounce,
+            line_diff_quiet_ms: quietMs,
+            line_diff_max_bytes: maxBytes,
+          },
+        }),
+      })
+      applyWatch(data)
+      const applied = Array.isArray(data.applied_watchers) ? data.applied_watchers.length : 0
+      setMessage(applied > 0 ? `监听时机已保存，已应用到 ${applied} 个任务` : data.message || "监听时机已保存")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存失败")
+    } finally {
+      setSaving(false)
+    }
+  }
+
   function updateChannel(key: string, patch: Partial<ChannelDraft>) {
     dingDirty.current = true
     setChannels((current) => current.map((item) => (item.key === key ? { ...item, ...patch } : item)))
@@ -195,7 +255,7 @@ export function SettingsPage() {
             设置
           </h1>
           <p className="text-sm text-muted-foreground">
-            LLM 用于自然语言生成规则；钉钉机器人供规则下拉选择。凭证保存在本机状态目录，不会写入被监听的文件夹。
+            LLM 用于自然语言添加和编辑规则；钉钉机器人供规则下拉选择。事件入账、行级快照等待和最大文件也可在此调整。凭证保存在本机状态目录，不会写入被监听的文件夹。
           </p>
         </div>
         <Button type="button" variant="outline" size="sm" onClick={() => navigate("/")}>
@@ -257,6 +317,58 @@ export function SettingsPage() {
             </Button>
             <Button type="button" variant="ghost" onClick={() => void clearKey()} disabled={saving || !keySet}>
               清除 Key
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>监听时机</CardTitle>
+          <CardDescription>
+            事件入账：同一文件连续变化时，安静这么久再记一条。行级快照：入账后再等这么久才计算增减行；超过最大文件则跳过行级对比。保存后写入本机设置，并应用到已有任务。
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <div className="grid gap-1.5">
+            <Label htmlFor="debounce-ms">事件入账（毫秒）</Label>
+            <Input
+              id="debounce-ms"
+              type="number"
+              min={0}
+              step={1}
+              value={debounceMs}
+              onChange={(event) => setDebounceMs(event.target.value)}
+              placeholder={String(DEFAULT_DEBOUNCE_MS)}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="line-diff-quiet">行级快照（秒）</Label>
+            <Input
+              id="line-diff-quiet"
+              type="number"
+              min={0}
+              step={0.1}
+              value={lineDiffQuietSeconds}
+              onChange={(event) => setLineDiffQuietSeconds(event.target.value)}
+              placeholder={String(DEFAULT_LINE_DIFF_QUIET_MS / 1000)}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="line-diff-max">行级快照最大文件（KB）</Label>
+            <Input
+              id="line-diff-max"
+              type="number"
+              min={1}
+              step={1}
+              value={lineDiffMaxKb}
+              onChange={(event) => setLineDiffMaxKb(event.target.value)}
+              placeholder={String(DEFAULT_LINE_DIFF_MAX_BYTES / 1024)}
+            />
+          </div>
+          <div>
+            <Button type="button" onClick={() => void saveWatch()} disabled={saving}>
+              保存监听时机
             </Button>
           </div>
         </CardContent>

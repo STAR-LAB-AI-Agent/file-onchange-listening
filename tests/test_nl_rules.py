@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from filewatch.nl_rules import extract_json_object, merge_rules, rules_from_text
+from filewatch.nl_rules import edit_rule_from_text, extract_json_object, merge_rules, rules_from_text
 
 
 def _llm(payload: dict):
@@ -94,9 +94,9 @@ def test_llm_generates_markdown_rule() -> None:
     assert "notify" in rule["then"][0]
 
 
-def test_llm_replace_and_webhook() -> None:
+def test_llm_replace_payload_still_appends() -> None:
     result = rules_from_text(
-        "替换：所有文件 POST https://example.invalid/hook",
+        "所有文件 POST https://example.invalid/hook",
         complete=_llm(
             {
                 "mode": "replace",
@@ -118,7 +118,7 @@ def test_llm_replace_and_webhook() -> None:
             }
         ),
     )
-    assert result["mode"] == "replace"
+    assert result["mode"] == "append"
     assert result["rules"][0]["then"][0]["notify"]["webhook"] == "https://example.invalid/hook"
 
 
@@ -175,12 +175,19 @@ def test_extract_json_object_from_prose() -> None:
     assert data["mode"] == "append"
 
 
-def test_merge_append_replaces_same_name() -> None:
+def test_merge_always_appends() -> None:
+    existing = [{"name": "a", "when": {}, "then": [{"notify": {}}]}]
+    generated = [{"name": "b", "when": {"glob": ["**/*.md"]}, "then": [{"notify": {"title": "x"}}]}]
+    merged = merge_rules(existing, generated)
+    assert [item["name"] for item in merged] == ["a", "b"]
+
+
+def test_merge_same_name_still_appends() -> None:
     existing = [{"name": "a", "when": {}, "then": [{"notify": {}}]}]
     generated = [{"name": "a", "when": {"glob": ["**/*.md"]}, "then": [{"notify": {"title": "x"}}]}]
-    merged = merge_rules(existing, generated, "append")
-    assert len(merged) == 1
-    assert merged[0]["when"]["glob"] == ["**/*.md"]
+    merged = merge_rules(existing, generated, "replace")
+    assert len(merged) == 2
+    assert merged[1]["when"]["glob"] == ["**/*.md"]
 
 
 def test_unique_name_when_appending() -> None:
@@ -204,14 +211,116 @@ def test_unique_name_when_appending() -> None:
     assert result["rules"][0]["name"].startswith("created-md")
 
 
-def test_merge_replace_drops_existing() -> None:
-    existing = [{"name": "old", "when": {}, "then": [{"notify": {}}]}]
-    generated = [{"name": "new", "when": {"glob": ["**/*.md"]}, "then": [{"notify": {}}]}]
-    merged = merge_rules(existing, generated, "replace")
-    assert [item["name"] for item in merged] == ["new"]
-
-
 def test_llm_garbage_is_bad_config() -> None:
     result = rules_from_text("新建 markdown", complete=lambda _s, _u: "抱歉，我不能输出 JSON")
     assert result["ok"] is False
     assert result["error"] == "bad_config"
+
+
+def test_yaml_exclude_rule_is_parsed() -> None:
+    text = """
+- name: skip-logs
+  exclude: true
+  when:
+    glob: ["**/*.log"]
+"""
+    result = rules_from_text(text)
+    assert result["ok"] is True
+    rule = result["rules"][0]
+    assert rule["exclude"] is True
+    assert rule["when"]["glob"] == ["**/*.log"]
+    assert rule.get("then") in (None, [])
+
+
+def test_llm_generates_exclude_rule() -> None:
+    result = rules_from_text(
+        "不要监听 log 文件",
+        complete=_llm(
+            {
+                "mode": "append",
+                "notes": ["排除日志"],
+                "rules": [
+                    {
+                        "name": "skip-logs",
+                        "exclude": True,
+                        "when": {"types": ["created", "modified", "deleted", "moved"], "glob": ["**/*.log"]},
+                        "then": [],
+                    }
+                ],
+            }
+        ),
+    )
+    assert result["ok"] is True
+    rule = result["rules"][0]
+    assert rule["exclude"] is True
+    assert rule["then"] == []
+    assert "**/*.log" in rule["when"]["glob"]
+
+
+def _notify_rule(name: str = "change-md", glob: str = "**/*.md") -> dict:
+    return {
+        "name": name,
+        "enabled": True,
+        "exclude": False,
+        "when": {"types": ["created", "modified"], "glob": [glob], "is_dir": False, "cooldown_seconds": 0},
+        "then": [{"notify": {"title": "文件有变化", "message": "{{type}}: {{path}}"}}],
+    }
+
+
+def test_edit_rule_from_text_updates_fields() -> None:
+    result = edit_rule_from_text(
+        "改成只匹配 txt，冷却 30 秒",
+        current=_notify_rule(),
+        existing_names=["change-md", "other"],
+        complete=_llm(
+            {
+                "notes": ["改 glob"],
+                "rule": {
+                    "name": "change-md",
+                    "enabled": True,
+                    "exclude": False,
+                    "when": {
+                        "types": ["created", "modified"],
+                        "glob": ["**/*.txt"],
+                        "is_dir": False,
+                        "cooldown_seconds": 30,
+                    },
+                    "then": [{"notify": {"title": "文件有变化", "message": "{{type}}: {{path}}"}}],
+                },
+            }
+        ),
+    )
+    assert result["ok"] is True
+    assert result["rule"]["name"] == "change-md"
+    assert result["rule"]["when"]["glob"] == ["**/*.txt"]
+    assert result["rule"]["when"]["cooldown_seconds"] == 30
+    assert result["notes"][0] == "由 LLM 编辑"
+
+
+def test_edit_rule_keeps_name_when_taken() -> None:
+    result = edit_rule_from_text(
+        "改名成 other",
+        current=_notify_rule("change-md"),
+        existing_names=["change-md", "other"],
+        complete=_llm({"rule": _notify_rule("other", "**/*.txt")}),
+    )
+    assert result["ok"] is True
+    assert result["rule"]["name"] != "other"
+    assert result["rule"]["name"].startswith("other")
+
+
+def test_edit_yaml_blob_replaces_current() -> None:
+    result = edit_rule_from_text(
+        "- name: skip-logs\n  exclude: true\n  when:\n    glob: ['**/*.log']\n",
+        current=_notify_rule(),
+    )
+    assert result["ok"] is True
+    assert result["rule"]["exclude"] is True
+    assert result["rule"]["when"]["glob"] == ["**/*.log"]
+    assert result["rule"].get("then") in (None, [])
+
+
+def test_edit_empty_text() -> None:
+    result = edit_rule_from_text("   ", current=_notify_rule())
+    assert result["ok"] is False
+    assert result["error"] == "empty_text"

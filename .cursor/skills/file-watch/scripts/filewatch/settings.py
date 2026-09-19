@@ -7,7 +7,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from filewatch.models import DEFAULT_DINGTALK_CHANNEL, DingTalkRef, DingTalkTarget
+from filewatch.models import (
+    DEFAULT_DEBOUNCE_MS,
+    DEFAULT_DINGTALK_CHANNEL,
+    DEFAULT_LINE_DIFF_MAX_BYTES,
+    DEFAULT_LINE_DIFF_QUIET_MS,
+    DingTalkRef,
+    DingTalkTarget,
+)
 from filewatch.paths import sanitize_id, state_root
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -32,6 +39,13 @@ class DingTalkChannel:
     webhook: str
     secret: str = ""
     interval_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class WatchTiming:
+    debounce_ms: int = DEFAULT_DEBOUNCE_MS
+    line_diff_quiet_ms: int = DEFAULT_LINE_DIFF_QUIET_MS
+    line_diff_max_bytes: int = DEFAULT_LINE_DIFF_MAX_BYTES
 
 
 def settings_path() -> Path:
@@ -133,6 +147,52 @@ def _parse_interval(raw: Any, *, field: str) -> tuple[float | None, str | None]:
     return value, None
 
 
+def _parse_int(raw: Any, *, field: str, default: int, min_value: int = 0) -> tuple[int | None, str | None]:
+    if raw is None or raw == "":
+        return default, None
+    try:
+        if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+            return None, f"{field} 必须是整数"
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, f"{field} 必须是整数"
+    if value < min_value:
+        return None, f"{field} 必须 >= {min_value}"
+    return value, None
+
+
+def _watch_store_from_file(stored: dict[str, Any]) -> dict[str, Any]:
+    raw = stored.get("watch") if isinstance(stored.get("watch"), dict) else {}
+    debounce, debounce_err = _parse_int(
+        raw.get("debounce_ms", DEFAULT_DEBOUNCE_MS), field="debounce_ms", default=DEFAULT_DEBOUNCE_MS
+    )
+    quiet, quiet_err = _parse_int(
+        raw.get("line_diff_quiet_ms", DEFAULT_LINE_DIFF_QUIET_MS),
+        field="line_diff_quiet_ms",
+        default=DEFAULT_LINE_DIFF_QUIET_MS,
+    )
+    max_bytes, max_err = _parse_int(
+        raw.get("line_diff_max_bytes", DEFAULT_LINE_DIFF_MAX_BYTES),
+        field="line_diff_max_bytes",
+        default=DEFAULT_LINE_DIFF_MAX_BYTES,
+        min_value=1,
+    )
+    return {
+        "debounce_ms": DEFAULT_DEBOUNCE_MS if debounce is None or debounce_err else debounce,
+        "line_diff_quiet_ms": DEFAULT_LINE_DIFF_QUIET_MS if quiet is None or quiet_err else quiet,
+        "line_diff_max_bytes": DEFAULT_LINE_DIFF_MAX_BYTES if max_bytes is None or max_err else max_bytes,
+    }
+
+
+def load_watch_timing() -> WatchTiming:
+    stored = _watch_store_from_file(_read_file())
+    return WatchTiming(
+        debounce_ms=stored["debounce_ms"],
+        line_diff_quiet_ms=stored["line_diff_quiet_ms"],
+        line_diff_max_bytes=stored["line_diff_max_bytes"],
+    )
+
+
 def load_dingtalk_channels() -> tuple[DingTalkChannel, ...]:
     stored = _dingtalk_store_from_file(_read_file())
     channels: list[DingTalkChannel] = []
@@ -201,6 +261,7 @@ def _public_channels() -> list[dict[str, Any]]:
 
 def public_settings() -> dict[str, Any]:
     cfg = load_llm_config()
+    timing = load_watch_timing()
     return {
         "ok": True,
         "llm": {
@@ -210,6 +271,11 @@ def public_settings() -> dict[str, Any]:
             "api_key_masked": mask_secret(cfg.api_key) if cfg.configured else "",
         },
         "dingtalk": {"channels": _public_channels()},
+        "watch": {
+            "debounce_ms": timing.debounce_ms,
+            "line_diff_quiet_ms": timing.line_diff_quiet_ms,
+            "line_diff_max_bytes": timing.line_diff_max_bytes,
+        },
     }
 
 
@@ -302,14 +368,53 @@ def _merge_dingtalk(raw: Any, stored: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "dingtalk": {"channels": channels}}
 
 
+def _merge_watch(raw: Any, stored: dict[str, Any]) -> dict[str, Any]:
+    current = _watch_store_from_file(stored)
+    if raw is None:
+        return {"ok": True, "watch": current}
+    if not isinstance(raw, dict):
+        return {"ok": False, "error": "bad_request", "message": "watch 必须是对象"}
+    debounce, debounce_err = _parse_int(
+        raw.get("debounce_ms", current["debounce_ms"]),
+        field="事件入账间隔",
+        default=current["debounce_ms"],
+    )
+    if debounce_err:
+        return {"ok": False, "error": "bad_request", "message": debounce_err}
+    quiet, quiet_err = _parse_int(
+        raw.get("line_diff_quiet_ms", current["line_diff_quiet_ms"]),
+        field="行级快照等待",
+        default=current["line_diff_quiet_ms"],
+    )
+    if quiet_err:
+        return {"ok": False, "error": "bad_request", "message": quiet_err}
+    max_bytes, max_err = _parse_int(
+        raw.get("line_diff_max_bytes", current["line_diff_max_bytes"]),
+        field="行级快照最大文件",
+        default=current["line_diff_max_bytes"],
+        min_value=1,
+    )
+    if max_err:
+        return {"ok": False, "error": "bad_request", "message": max_err}
+    return {
+        "ok": True,
+        "watch": {
+            "debounce_ms": debounce if debounce is not None else DEFAULT_DEBOUNCE_MS,
+            "line_diff_quiet_ms": quiet if quiet is not None else DEFAULT_LINE_DIFF_QUIET_MS,
+            "line_diff_max_bytes": max_bytes if max_bytes is not None else DEFAULT_LINE_DIFF_MAX_BYTES,
+        },
+    }
+
+
 def save_settings(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"ok": False, "error": "bad_request", "message": "请求体必须是对象"}
     has_llm_key = isinstance(data.get("llm"), dict)
     has_ding_key = "dingtalk" in data
+    has_watch_key = "watch" in data
     looks_like_llm = any(key in data for key in ("base_url", "model", "api_key", "clear_api_key"))
-    if not has_llm_key and not has_ding_key and not looks_like_llm:
-        return {"ok": False, "error": "bad_request", "message": "请求体必须包含 llm 或 dingtalk"}
+    if not has_llm_key and not has_ding_key and not has_watch_key and not looks_like_llm:
+        return {"ok": False, "error": "bad_request", "message": "请求体必须包含 llm、dingtalk 或 watch"}
 
     stored = _read_file()
     if has_llm_key or looks_like_llm:
@@ -329,5 +434,13 @@ def save_settings(data: dict[str, Any]) -> dict[str, Any]:
     else:
         ding_store = _dingtalk_store_from_file(stored)
 
-    _atomic_write(settings_path(), {"llm": llm_store, "dingtalk": ding_store})
+    if has_watch_key:
+        merged_watch = _merge_watch(data.get("watch"), stored)
+        if not merged_watch.get("ok"):
+            return merged_watch
+        watch_store = merged_watch["watch"]
+    else:
+        watch_store = _watch_store_from_file(stored)
+
+    _atomic_write(settings_path(), {"llm": llm_store, "dingtalk": ding_store, "watch": watch_store})
     return {**public_settings(), "message": "设置已保存"}

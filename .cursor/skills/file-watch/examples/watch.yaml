@@ -1,12 +1,16 @@
 # 改规则后：validate --config 本文件，已运行则 reload，未运行则 start。
+# 任务显示名，默认用文件夹名。CLI --id 请用 list 里的 watch_id，不要用本字段。
 name: inbox
 max_parallel_jobs: 1
 watch:
   path: ./inbox
   recursive: true
   debounce_ms: 400
-  # 可读文本行级 diff：该文件再安静这么久才结算一次（默认 2 秒）
-  line_diff_quiet_ms: 2000
+  # 可读文本行级 diff：该文件再安静这么久才结算一次（默认 30 秒）
+  line_diff_quiet_ms: 30000
+  # 超过这个大小不做行级对比（默认 256KB）
+  line_diff_max_bytes: 262144
+  # record_all: false   # 仅记录命中正向规则的文件；省略或 true 则默认记录全部变化
   ignore:
     - "**/.git/**"
     - "**/__pycache__/**"
@@ -31,6 +35,11 @@ rules:
           # 取消注释后，命中事件每分钟汇总推送到钉钉群（无变化不发送）。
           # dingtalk: true   # 使用设置页默认钉钉渠道
           # 或 dingtalk: { channel: work }
+  # 反向规则：命中后不入账（文件变化和其它规则都不会触发）。record_all 为 true（默认）时仍会记录未排除的文件。
+  # - name: skip-logs
+  #   exclude: true
+  #   when:
+  #     glob: "**/*.log"
   # 只在工作日白天生效的示例：
   # - name: workday-notify
   #   when:

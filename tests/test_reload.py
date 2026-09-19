@@ -104,6 +104,38 @@ def test_apply_reload_warns_on_max_parallel(tmp_path: Path) -> None:
         runtime.actions.close(wait=False)
 
 
+def test_apply_reload_updates_display_name(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("demo", root=tmp_path / "state")
+    runtime = WatchRuntime(parse_config_dict(_config(inbox, "**/*")), store)
+    try:
+        next_cfg = _config(inbox, "**/*.md", name="文档监听")
+        result = runtime.apply_reload(parse_config_dict(next_cfg))
+        assert runtime.config.name == "文档监听"
+        assert result["name"] == "文档监听"
+    finally:
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
+
+
+def test_apply_reload_updates_record_all(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("demo", root=tmp_path / "state")
+    runtime = WatchRuntime(parse_config_dict(_config(inbox, "**/*")), store)
+    try:
+        assert runtime.config.watch.record_all is True
+        changed = _config(inbox, "**/*.md")
+        changed["watch"]["record_all"] = False
+        result = runtime.apply_reload(parse_config_dict(changed))
+        assert runtime.config.watch.record_all is False
+        assert result["record_all"] is False
+    finally:
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
+
+
 def test_validate_accepts_and_rejects(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()

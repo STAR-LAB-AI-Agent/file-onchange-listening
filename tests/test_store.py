@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from filewatch.linediff import put_line_changes
 from filewatch.store import WatchStore
 
 
@@ -82,6 +83,31 @@ def test_query_records_filters_time_and_type(tmp_path) -> None:
     assert result["total"] == 1
 
 
+def test_query_records_filters_path_query(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.append(
+        "events",
+        {"id": "keep", "type": "created", "path": r"D:\data\inbox\README.md", "ts": "2026-09-17T10:00:00Z"},
+    )
+    store.append(
+        "events",
+        {"id": "moved", "type": "moved", "path": r"D:\data\inbox\docs\note.txt", "old_path": r"D:\data\inbox\draft.md", "ts": "2026-09-17T11:00:00Z"},
+    )
+    store.append(
+        "events",
+        {"id": "other", "type": "modified", "path": r"D:\data\inbox\skip.log", "ts": "2026-09-17T12:00:00Z"},
+    )
+    by_name = store.query_records("events", page=1, page_size=100, path_query="readme.md")
+    assert [item["id"] for item in by_name["items"]] == ["keep"]
+    by_slash = store.query_records("events", page=1, page_size=100, path_query="inbox/docs")
+    assert [item["id"] for item in by_slash["items"]] == ["moved"]
+    by_old = store.query_records("events", page=1, page_size=100, path_query="DRAFT.MD")
+    assert [item["id"] for item in by_old["items"]] == ["moved"]
+    empty = store.query_records("events", page=1, page_size=100, path_query="   ")
+    assert [item["id"] for item in empty["items"]] == ["other", "moved", "keep"]
+
+
 def test_ack_cannot_move_backwards(tmp_path) -> None:
     store = WatchStore("demo", root=tmp_path)
     store.ensure()
@@ -94,6 +120,24 @@ def test_ack_cannot_move_backwards(tmp_path) -> None:
         raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert "backwards" in str(exc)
+
+
+def test_query_records_hides_noop_modified(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.append("events", {"id": "keep", "type": "created", "ts": "2026-09-17T10:00:00Z"})
+    store.append(
+        "events",
+        {"id": "noop", "type": "modified", "ts": "2026-09-17T11:00:00Z"},
+    )
+    put_line_changes(
+        store.line_changes_path,
+        "noop",
+        {"kind": "text", "added": 0, "removed": 0, "truncated": False, "changes": []},
+    )
+    result = store.query_records("events", page=1, page_size=100)
+    assert [item["id"] for item in result["items"]] == ["keep"]
+    assert result["total"] == 1
 
 
 def test_query_records_rejects_bad_time(tmp_path) -> None:

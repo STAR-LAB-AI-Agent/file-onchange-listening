@@ -6,13 +6,14 @@ import os
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from filewatch.config import Config, ConfigError, config_from_path, config_to_dict, parse_config_dict, summarize_config
+from filewatch.config import Config, ConfigError, config_from_path, config_to_dict, folder_title, normalize_watch_name, parse_config_dict, summarize_config
 from filewatch.models import STREAMS
-from filewatch.nl_rules import merge_rules, rules_from_text
-from filewatch.paths import sanitize_id, state_root
+from filewatch.nl_rules import edit_rule_from_text, merge_rules, rules_from_text
+from filewatch.paths import sanitize_id, slug_id, state_root
 from filewatch.process import pid_alive, spawn_detached, terminate_pid
 from filewatch.store import WatchStore, list_stores
 
@@ -39,6 +40,16 @@ def load_saved_config(store: WatchStore) -> Config | None:
     return parse_config_dict(raw, source=str(store.config_path))
 
 
+def watcher_title(store: WatchStore, config: Config | None) -> str:
+    watch_path = config.watch.path if config else None
+    folder = folder_title(watch_path) if watch_path else store.watch_id
+    if not config or not (config.name or "").strip():
+        return folder
+    if config.name == store.watch_id:
+        return folder
+    return config.name
+
+
 def describe_watcher(store: WatchStore) -> dict[str, Any]:
     running, pid = running_pid(store)
     config = None
@@ -47,7 +58,7 @@ def describe_watcher(store: WatchStore) -> dict[str, Any]:
     except (ConfigError, json.JSONDecodeError, OSError):
         config = None
     watch_path = config.watch.path if config else None
-    title = Path(watch_path).name if watch_path else store.watch_id
+    title = watcher_title(store, config)
     last_event = None
     event_count = 0
     if store.events_path.exists():
@@ -62,6 +73,7 @@ def describe_watcher(store: WatchStore) -> dict[str, Any]:
         "pid": pid,
         "path": watch_path,
         "recursive": config.watch.recursive if config else None,
+        "record_all": config.watch.record_all if config else True,
         "rules": [rule.name for rule in config.rules] if config else [],
         "rule_count": len(config.rules) if config else 0,
         "event_count": event_count,
@@ -108,8 +120,17 @@ def spawn_daemon(store: WatchStore) -> int:
     return spawn_detached(argv, store.log_path, env=env)
 
 
+def start_watch_id(config: Config, watch_id: str | None = None) -> str:
+    if watch_id:
+        return sanitize_id(watch_id)
+    slug = slug_id(config.name)
+    if slug:
+        return slug
+    return allocate_watch_id(Path(config.watch.path))
+
+
 def start_watch(config: Config, watch_id: str | None = None) -> dict[str, Any]:
-    watch_id = sanitize_id(watch_id or config.name)
+    watch_id = start_watch_id(config, watch_id)
     watch_path = Path(config.watch.path)
     if not watch_path.is_dir():
         return {
@@ -166,7 +187,10 @@ def start_watch(config: Config, watch_id: str | None = None) -> dict[str, Any]:
 def allocate_watch_id(resolved: Path, explicit: str | None = None) -> str:
     if explicit:
         return sanitize_id(explicit)
-    base = sanitize_id(resolved.name or "watch")
+    base = slug_id(resolved.name or "")
+    if not base:
+        digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12]
+        return f"watch-{digest}"
     store = store_for(base)
     if not store.config_path.exists():
         return base
@@ -180,7 +204,15 @@ def allocate_watch_id(resolved: Path, explicit: str | None = None) -> str:
     return sanitize_id(f"{base}-{digest}")
 
 
-def start_path(path: str, *, watch_id: str | None = None, recursive: bool = True, reuse: bool = True) -> dict[str, Any]:
+def start_path(
+    path: str,
+    *,
+    watch_id: str | None = None,
+    name: str | None = None,
+    recursive: bool = True,
+    record_all: bool = True,
+    reuse: bool = True,
+) -> dict[str, Any]:
     try:
         resolved = Path(path).expanduser().resolve()
     except OSError as exc:
@@ -205,11 +237,20 @@ def start_path(path: str, *, watch_id: str | None = None, recursive: bool = True
             if saved is not None:
                 return start_watch(saved, existing.watch_id)
             return start_watch(
-                config_from_path(str(resolved), name=existing.watch_id, recursive=recursive),
+                config_from_path(
+                    str(resolved),
+                    name=resolved.name,
+                    recursive=recursive,
+                    record_all=record_all,
+                ),
                 existing.watch_id,
             )
     allocated = allocate_watch_id(resolved, watch_id)
-    config = config_from_path(str(resolved), name=allocated, recursive=recursive)
+    try:
+        display = normalize_watch_name(name, path=resolved)
+    except ConfigError as exc:
+        return {"ok": False, "error": "bad_request", "message": str(exc)}
+    config = config_from_path(str(resolved), name=display, recursive=recursive, record_all=record_all)
     return start_watch(config, allocated)
 
 
@@ -245,6 +286,7 @@ def read_stream(
     ts_from: str | None = None,
     ts_to: str | None = None,
     event_type: str | None = None,
+    path_query: str | None = None,
 ) -> dict[str, Any]:
     if stream not in STREAMS:
         return {"ok": False, "error": "bad_stream", "message": f"stream 必须是 {STREAMS} 之一"}
@@ -258,6 +300,7 @@ def read_stream(
                 ts_from=ts_from,
                 ts_to=ts_to,
                 event_type=event_type,
+                path_query=path_query,
             )
         except ValueError as exc:
             field = str(exc)
@@ -302,6 +345,124 @@ def read_stream(
 
 def _missing_watcher(watch_id: str) -> dict[str, Any]:
     return {"ok": False, "error": "not_found", "message": f"没有找到监听 {watch_id}"}
+
+
+def rename_watcher(watch_id: str, name: object, *, timeout: float = 5.0) -> dict[str, Any]:
+    watch_id = sanitize_id(watch_id)
+    store = store_for(watch_id)
+    if not store.config_path.exists():
+        return _missing_watcher(watch_id)
+    saved = load_saved_config(store)
+    if saved is None:
+        return {"ok": False, "error": "bad_config", "message": "配置无法读取"}
+    try:
+        title = normalize_watch_name(name, path=saved.watch.path)
+    except ConfigError as exc:
+        return {"ok": False, "error": "bad_request", "message": str(exc)}
+    if title == saved.name:
+        return {
+            "ok": True,
+            **describe_watcher(store),
+            "applied": False,
+            "reloaded": False,
+            "message": "名称未变化",
+        }
+    config = Config(
+        name=title,
+        watch=saved.watch,
+        rules=saved.rules,
+        max_parallel_jobs=saved.max_parallel_jobs,
+        source=saved.source,
+    )
+    payload = config_to_dict(config)
+    running, pid = running_pid(store)
+    if not running:
+        store.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "ok": True,
+            **describe_watcher(store),
+            "applied": True,
+            "reloaded": False,
+            "running": False,
+            "pid": pid,
+            "message": "任务名称已更新",
+            "config": payload,
+        }
+    generation = uuid.uuid4().hex
+    store.request_reload(payload, generation)
+    result = wait_reload(store, generation, timeout)
+    if not result.get("ok"):
+        return result
+    latest = load_saved_config(store) or config
+    result.update(
+        {
+            "applied": True,
+            "reloaded": True,
+            "running": True,
+            "pid": pid,
+            "message": "任务名称已更新",
+            "config": config_to_dict(latest),
+        }
+    )
+    return result
+
+
+def save_watch_options(watch_id: str, *, record_all: bool, timeout: float = 5.0) -> dict[str, Any]:
+    watch_id = sanitize_id(watch_id)
+    store = store_for(watch_id)
+    if not store.config_path.exists():
+        return _missing_watcher(watch_id)
+    saved = load_saved_config(store)
+    if saved is None:
+        return {"ok": False, "error": "bad_config", "message": "配置无法读取"}
+    if record_all == saved.watch.record_all:
+        return {
+            "ok": True,
+            **describe_watcher(store),
+            "applied": False,
+            "reloaded": False,
+            "message": "入账范围未变化",
+            "config": config_to_dict(saved),
+        }
+    config = Config(
+        name=saved.name,
+        watch=replace(saved.watch, record_all=record_all),
+        rules=saved.rules,
+        max_parallel_jobs=saved.max_parallel_jobs,
+        source=saved.source,
+    )
+    payload = config_to_dict(config)
+    running, pid = running_pid(store)
+    message = "已改为记录全部文件变化" if record_all else "已改为仅记录命中规则的文件"
+    if not running:
+        store.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "ok": True,
+            **describe_watcher(store),
+            "applied": True,
+            "reloaded": False,
+            "running": False,
+            "pid": pid,
+            "message": f"{message}；监听未运行，下次 start 后生效",
+            "config": payload,
+        }
+    generation = uuid.uuid4().hex
+    store.request_reload(payload, generation)
+    result = wait_reload(store, generation, timeout)
+    if not result.get("ok"):
+        return result
+    latest = load_saved_config(store) or config
+    result.update(
+        {
+            "applied": True,
+            "reloaded": True,
+            "running": True,
+            "pid": pid,
+            "message": message,
+            "config": config_to_dict(latest),
+        }
+    )
+    return result
 
 
 def watcher_config(watch_id: str) -> dict[str, Any]:
@@ -418,7 +579,58 @@ def save_rules(watch_id: str, rules_raw: Any, *, timeout: float = 8.0) -> dict[s
     return result
 
 
+def apply_watch_timing(
+    debounce_ms: int,
+    line_diff_quiet_ms: int,
+    line_diff_max_bytes: int | None = None,
+    *,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    applied: list[dict[str, Any]] = []
+    for store in list_stores():
+        try:
+            saved = load_saved_config(store)
+        except (ConfigError, json.JSONDecodeError, OSError):
+            continue
+        if saved is None:
+            continue
+        config = Config(
+            name=saved.name,
+            watch=replace(
+                saved.watch,
+                debounce_ms=debounce_ms,
+                line_diff_quiet_ms=line_diff_quiet_ms,
+                line_diff_max_bytes=saved.watch.line_diff_max_bytes if line_diff_max_bytes is None else line_diff_max_bytes,
+            ),
+            rules=saved.rules,
+            max_parallel_jobs=saved.max_parallel_jobs,
+            source=saved.source,
+        )
+        payload = config_to_dict(config)
+        running, pid = running_pid(store)
+        if not running:
+            store.config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            applied.append({"watch_id": store.watch_id, "reloaded": False, "running": False, "pid": pid})
+            continue
+        generation = uuid.uuid4().hex
+        store.request_reload(payload, generation)
+        result = wait_reload(store, generation, timeout)
+        applied.append(
+            {
+                "watch_id": store.watch_id,
+                "reloaded": bool(result.get("ok")),
+                "running": True,
+                "pid": pid,
+                "ok": result.get("ok"),
+                "error": result.get("error"),
+                "message": result.get("message"),
+            }
+        )
+    return {"ok": True, "watchers": applied}
+
+
 def preview_rules_from_text(watch_id: str, text: str, *, mode: str | None = None) -> dict[str, Any]:
+    del mode
     watch_id = sanitize_id(watch_id)
     store = store_for(watch_id)
     if not store.config_path.exists():
@@ -430,12 +642,10 @@ def preview_rules_from_text(watch_id: str, text: str, *, mode: str | None = None
     generated = rules_from_text(
         text,
         existing_names=[str(item.get("name")) for item in existing],
-        mode=mode,
     )
     if not generated.get("ok"):
         return generated
-    resolved_mode = str(generated.get("mode") or "append")
-    merged = merge_rules(existing, generated["rules"], resolved_mode)
+    merged = merge_rules(existing, generated["rules"])
     try:
         parse_config_dict({**config_to_dict(saved), "rules": merged}, source=saved.source)
     except ConfigError as exc:
@@ -443,7 +653,7 @@ def preview_rules_from_text(watch_id: str, text: str, *, mode: str | None = None
     return {
         "ok": True,
         **describe_watcher(store),
-        "mode": resolved_mode,
+        "mode": "append",
         "rules": generated["rules"],
         "merged_rules": merged,
         "notes": generated.get("notes") or [],
@@ -468,6 +678,65 @@ def apply_rules_from_text(
         {
             "mode": preview["mode"],
             "generated": preview["rules"],
+            "notes": preview["notes"],
+            "warnings": preview["warnings"],
+        }
+    )
+    return saved
+
+
+def preview_edit_rule_from_text(watch_id: str, index: int, text: str) -> dict[str, Any]:
+    watch_id = sanitize_id(watch_id)
+    store = store_for(watch_id)
+    if not store.config_path.exists():
+        return _missing_watcher(watch_id)
+    saved = load_saved_config(store)
+    if saved is None:
+        return {"ok": False, "error": "bad_config", "message": "配置无法读取"}
+    existing = config_to_dict(saved)["rules"]
+    if index < 0 or index >= len(existing):
+        return {"ok": False, "error": "bad_request", "message": "规则序号无效"}
+    edited = edit_rule_from_text(
+        text,
+        current=existing[index],
+        existing_names=[str(item.get("name")) for item in existing],
+    )
+    if not edited.get("ok"):
+        return edited
+    merged = list(existing)
+    merged[index] = edited["rule"]
+    try:
+        parse_config_dict({**config_to_dict(saved), "rules": merged}, source=saved.source)
+    except ConfigError as exc:
+        return {"ok": False, "error": "bad_config", "message": str(exc)}
+    return {
+        "ok": True,
+        **describe_watcher(store),
+        "index": index,
+        "rule": edited["rule"],
+        "merged_rules": merged,
+        "notes": edited.get("notes") or [],
+        "warnings": edited.get("warnings") or [],
+    }
+
+
+def apply_edit_rule_from_text(
+    watch_id: str,
+    index: int,
+    text: str,
+    *,
+    timeout: float = 8.0,
+) -> dict[str, Any]:
+    preview = preview_edit_rule_from_text(watch_id, index, text)
+    if not preview.get("ok"):
+        return preview
+    saved = save_rules(watch_id, preview["merged_rules"], timeout=timeout)
+    if not saved.get("ok"):
+        return saved
+    saved.update(
+        {
+            "index": preview["index"],
+            "generated": [preview["rule"]],
             "notes": preview["notes"],
             "warnings": preview["warnings"],
         }

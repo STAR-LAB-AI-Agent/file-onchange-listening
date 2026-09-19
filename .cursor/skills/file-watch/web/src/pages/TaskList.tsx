@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react"
 import { AlertCircleIcon, FolderOpenIcon, PlayIcon, Settings2Icon, SquareIcon } from "lucide-react"
 
+import { WatchTitle } from "@/components/WatchTitle"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Switch } from "@/components/ui/switch"
 import {
   Table,
   TableBody,
@@ -25,6 +27,8 @@ import {
 
 export function TaskList() {
   const [path, setPath] = useState("")
+  const [name, setName] = useState("")
+  const [recordAll, setRecordAll] = useState(true)
   const [tasks, setTasks] = useState<WatcherInfo[]>([])
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
@@ -57,6 +61,7 @@ export function TaskList() {
 
   async function startWatch() {
     const folder = path.trim()
+    const title = name.trim()
     if (!folder) {
       setError("请输入要监听的文件夹路径")
       return
@@ -67,10 +72,17 @@ export function TaskList() {
       const data = await api<WatcherInfo>("/api/watchers/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: folder, recursive: true }),
+        body: JSON.stringify({
+          path: folder,
+          recursive: true,
+          record_all: recordAll,
+          ...(title ? { name: title } : {}),
+        }),
       })
       if (!data.watch_id) throw new Error("未返回任务 id")
       setPath("")
+      setName("")
+      setRecordAll(true)
       await refresh()
       navigate(`/tasks/${encodeURIComponent(data.watch_id)}`)
     } catch (err) {
@@ -133,11 +145,35 @@ export function TaskList() {
                 className="h-9 pl-8 font-mono"
               />
             </div>
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void startWatch()
+              }}
+              placeholder="任务名称（默认文件夹名）"
+              className="h-9 sm:max-w-[14rem]"
+            />
             <Button onClick={() => void startWatch()} disabled={starting}>
               <PlayIcon data-icon="inline-start" />
               添加并监听
             </Button>
           </div>
+          <label className="flex max-w-xl items-start gap-2 text-sm">
+            <Switch
+              className="mt-0.5"
+              checked={recordAll}
+              onCheckedChange={setRecordAll}
+            />
+            <span>
+              <span className="font-medium">默认监听全部文件变化</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">
+                {recordAll
+                  ? "除忽略和排除规则外，目录下的变化都会记入文件变化列表。"
+                  : "关闭后只记录命中规则的文件。创建时没有规则就不会出现变化，添加规则后再监听指定文件。"}
+              </span>
+            </span>
+          </label>
           {error ? (
             <Alert variant="destructive">
               <AlertCircleIcon />
@@ -162,7 +198,7 @@ export function TaskList() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>目录</TableHead>
+                  <TableHead>任务</TableHead>
                   <TableHead className="w-28">状态</TableHead>
                   <TableHead>最近变化</TableHead>
                   <TableHead className="w-52 text-right">操作</TableHead>
@@ -178,13 +214,24 @@ export function TaskList() {
                       onClick={() => navigate(`/tasks/${encodeURIComponent(task.watch_id || "")}`)}
                     >
                       <TableCell>
-                        <div className="font-medium">{task.title || task.watch_id}</div>
+                        <WatchTitle
+                          watchId={task.watch_id || ""}
+                          title={task.title}
+                          path={task.path}
+                          onRenamed={() => void refresh()}
+                          onError={setError}
+                        />
                         <div className="font-mono text-xs break-all text-muted-foreground">{task.path}</div>
                       </TableCell>
                       <TableCell>
                         <Badge variant={task.running ? "default" : "secondary"}>
                           {task.running ? "运行中" : "已停止"}
                         </Badge>
+                        {task.record_all === false ? (
+                          <Badge variant="outline" className="mt-1">
+                            仅规则命中
+                          </Badge>
+                        ) : null}
                         <div className="mt-1 text-xs text-muted-foreground">
                           {task.event_count || 0} 条事件 · {task.rule_count || 0} 条规则
                         </div>

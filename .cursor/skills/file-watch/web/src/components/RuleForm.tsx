@@ -6,7 +6,13 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { NativeSelect } from "@/components/ui/native-select"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -24,6 +30,7 @@ import {
 } from "@/lib/api"
 
 const TYPE_IDS = ["created", "modified", "deleted", "moved"] as const
+const DING_NONE = "__none__"
 
 const EVENT_TYPE_ON_CLASS: Record<(typeof TYPE_IDS)[number], string> = {
   created:
@@ -64,7 +71,14 @@ export function RuleForm({
   const agent0 = initial.then?.find((item) => item.agent)?.agent
   const [name, setName] = useState(initial.name || "")
   const [enabled, setEnabled] = useState(initial.enabled !== false)
-  const [types, setTypes] = useState<string[]>(initial.when?.types?.length ? initial.when.types : ["created", "modified"])
+  const [exclude, setExclude] = useState(initial.exclude === true)
+  const [types, setTypes] = useState<string[]>(
+    initial.when?.types?.length
+      ? initial.when.types
+      : initial.exclude
+        ? ["created", "modified", "deleted", "moved"]
+        : ["created", "modified"],
+  )
   const [glob, setGlob] = useState((initial.when?.glob || []).join(", "))
   const [regex, setRegex] = useState(initial.when?.regex || "")
   const [isDir, setIsDir] = useState(
@@ -98,7 +112,11 @@ export function RuleForm({
     return agent0.prompt || ""
   })
 
-  const canSubmit = useMemo(() => types.length > 0, [types])
+  const canSubmit = useMemo(() => {
+    if (!types.length) return false
+    if (exclude) return splitList(glob).length > 0 || Boolean(regex.trim())
+    return true
+  }, [types, exclude, glob, regex])
 
   useEffect(() => {
     function apply(next: DingTalkChannel[]) {
@@ -118,6 +136,35 @@ export function RuleForm({
   }, [channelsProp])
 
   function submit() {
+    const globList = splitList(glob)
+    const days = activeDays.length === 7 ? [] : activeDays
+    const active =
+      !activeStart && !activeEnd && days.length === 0
+        ? null
+        : {
+            start: activeStart || null,
+            end: activeEnd || null,
+            days,
+          }
+    const when = {
+      types,
+      glob: exclude ? globList : globList.length ? globList : ["**/*"],
+      regex: regex.trim() || null,
+      is_dir: isDir === "dir" ? true : isDir === "file" ? false : null,
+      cooldown_seconds: exclude ? 0 : Number(cooldown) || 0,
+      min_size_bytes: exclude ? null : minSize.trim() ? Number(minSize) : null,
+      active,
+    }
+    if (exclude) {
+      onSubmit({
+        name: name.trim() || "skip-files",
+        enabled,
+        exclude: true,
+        when,
+        then: [],
+      })
+      return
+    }
     const then: WatchRule["then"] = [
       {
         notify: {
@@ -152,28 +199,11 @@ export function RuleForm({
         },
       })
     }
-    const globList = splitList(glob)
-    const days = activeDays.length === 7 ? [] : activeDays
-    const active =
-      !activeStart && !activeEnd && days.length === 0
-        ? null
-        : {
-            start: activeStart || null,
-            end: activeEnd || null,
-            days,
-          }
     onSubmit({
       name: name.trim() || "rule",
       enabled,
-      when: {
-        types,
-        glob: globList.length ? globList : ["**/*"],
-        regex: regex.trim() || null,
-        is_dir: isDir === "dir" ? true : isDir === "file" ? false : null,
-        cooldown_seconds: Number(cooldown) || 0,
-        min_size_bytes: minSize.trim() ? Number(minSize) : null,
-        active,
-      },
+      exclude: false,
+      when,
       then,
     })
   }
@@ -191,6 +221,34 @@ export function RuleForm({
           启用
         </label>
         <FieldHint>关闭后规则仍保存在配置中，但不会命中。</FieldHint>
+      </div>
+      <div className="grid gap-1.5">
+        <Label>规则类型</Label>
+        <ToggleGroup
+          type="single"
+          variant="outline"
+          size="sm"
+          value={exclude ? "exclude" : "match"}
+          onValueChange={(value) => {
+            if (!value) return
+            const next = value === "exclude"
+            setExclude(next)
+            if (next) {
+              setTypes((current) => (current.length ? current : ["created", "modified", "deleted", "moved"]))
+              if (splitList(glob).length === 1 && splitList(glob)[0] === "**/*") setGlob("")
+            } else if (!splitList(glob).length) {
+              setGlob("**/*")
+            }
+          }}
+        >
+          <ToggleGroupItem value="match">通知 / 任务</ToggleGroupItem>
+          <ToggleGroupItem value="exclude">反向：排除监听</ToggleGroupItem>
+        </ToggleGroup>
+        <FieldHint>
+          {exclude
+            ? "命中的文件不会出现在「文件变化」里，也不会触发其它规则。默认仍监听全部文件。"
+            : "正向规则：命中后发通知或启动任务。"}
+        </FieldHint>
       </div>
 
       <div className="grid gap-1.5">
@@ -221,7 +279,9 @@ export function RuleForm({
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
-        <FieldHint>至少选一项。监听保存文档时一般选「新建」和「修改」。</FieldHint>
+        <FieldHint>
+          {exclude ? "至少选一项。不选则四种事件都会排除。" : "至少选一项。监听保存文档时一般选「新建」和「修改」。"}
+        </FieldHint>
       </div>
 
       <div className="grid gap-1.5">
@@ -230,11 +290,13 @@ export function RuleForm({
           id="rule-glob"
           value={glob}
           onChange={(event) => setGlob(event.target.value)}
-          placeholder="**/*.md, docs/**/*.txt"
+          placeholder={exclude ? "**/*.log, **/*.tmp" : "**/*.md, docs/**/*.txt"}
           className="font-mono"
         />
         <FieldHint>
-          相对监听根目录匹配，多项用逗号分隔。只写 *.md 不会进子目录。例：{"**/*.md"} 匹配全部 markdown。
+          {exclude
+            ? "必填。相对监听根目录，多项用逗号分隔。例：**/*.log 表示不再监听日志文件。"
+            : "相对监听根目录匹配，多项用逗号分隔。只写 *.md 不会进子目录。例：**/*.md 匹配全部 markdown。"}
         </FieldHint>
       </div>
       <div className="grid gap-1.5">
@@ -246,10 +308,14 @@ export function RuleForm({
           placeholder={"^docs/.*\\.md$"}
           className="font-mono"
         />
-        <FieldHint>对相对路径再过滤，需同时满足 glob。留空则不过滤。例：{"^notes/.*\\.md$"}</FieldHint>
+        <FieldHint>
+          {exclude
+            ? "对相对路径再过滤。Glob 和正则至少填一项。"
+            : "对相对路径再过滤，需同时满足 glob。留空则不过滤。例：^notes/.*\\.md$"}
+        </FieldHint>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className={exclude ? "grid gap-1.5" : "grid grid-cols-2 gap-3"}>
         <div className="grid gap-1.5">
           <Label>路径类型</Label>
           <ToggleGroup
@@ -267,31 +333,35 @@ export function RuleForm({
           </ToggleGroup>
           <FieldHint>「文件」忽略文件夹事件；「目录」只匹配文件夹。</FieldHint>
         </div>
+        {exclude ? null : (
+          <div className="grid gap-1.5">
+            <Label htmlFor="rule-cooldown">冷却（秒）</Label>
+            <Input
+              id="rule-cooldown"
+              type="number"
+              min={0}
+              value={cooldown}
+              onChange={(event) => setCooldown(event.target.value)}
+              placeholder="30"
+            />
+            <FieldHint>同一路径在间隔内重复变化只触发一次。0 表示不限制。例：30</FieldHint>
+          </div>
+        )}
+      </div>
+      {exclude ? null : (
         <div className="grid gap-1.5">
-          <Label htmlFor="rule-cooldown">冷却（秒）</Label>
+          <Label htmlFor="rule-minsize">最小字节（可选）</Label>
           <Input
-            id="rule-cooldown"
+            id="rule-minsize"
             type="number"
             min={0}
-            value={cooldown}
-            onChange={(event) => setCooldown(event.target.value)}
-            placeholder="30"
+            value={minSize}
+            onChange={(event) => setMinSize(event.target.value)}
+            placeholder="1024"
           />
-          <FieldHint>同一路径在间隔内重复变化只触发一次。0 表示不限制。例：30</FieldHint>
+          <FieldHint>小于该大小的文件不命中，留空不限制。例：1024 表示忽略 1KB 以下文件。</FieldHint>
         </div>
-      </div>
-      <div className="grid gap-1.5">
-        <Label htmlFor="rule-minsize">最小字节（可选）</Label>
-        <Input
-          id="rule-minsize"
-          type="number"
-          min={0}
-          value={minSize}
-          onChange={(event) => setMinSize(event.target.value)}
-          placeholder="1024"
-        />
-        <FieldHint>小于该大小的文件不命中，留空不限制。例：1024 表示忽略 1KB 以下文件。</FieldHint>
-      </div>
+      )}
 
       <div className="grid gap-1.5">
         <Label>生效时间</Label>
@@ -338,6 +408,8 @@ export function RuleForm({
         </FieldHint>
       </div>
 
+      {exclude ? null : (
+        <>
       <div className="grid gap-1.5">
         <Label htmlFor="rule-title">通知标题</Label>
         <Input
@@ -376,20 +448,26 @@ export function RuleForm({
       </div>
       <div className="grid gap-1.5">
         <Label htmlFor="rule-dingtalk">钉钉群</Label>
-        <NativeSelect
-          id="rule-dingtalk"
-          value={dingChannel}
-          onChange={(event) => setDingChannel(event.target.value)}
+        <Select
+          value={dingChannel || DING_NONE}
+          onValueChange={(value) => setDingChannel(value === DING_NONE ? "" : value)}
         >
-          <option value="">不推送</option>
-          {channels.map((channel) => (
-            <option key={channel.id} value={channel.id}>
-              {channel.name || channel.id}
-            </option>
-          ))}
-          {dingChannel === "*" ? <option value="*">默认渠道</option> : null}
-          {dingChannel === "__legacy__" ? <option value="__legacy__">规则内配置（请改选设置中的机器人）</option> : null}
-        </NativeSelect>
+          <SelectTrigger id="rule-dingtalk">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={DING_NONE}>不推送</SelectItem>
+            {channels.map((channel) => (
+              <SelectItem key={channel.id} value={channel.id}>
+                {channel.name || channel.id}
+              </SelectItem>
+            ))}
+            {dingChannel === "*" ? <SelectItem value="*">默认渠道</SelectItem> : null}
+            {dingChannel === "__legacy__" ? (
+              <SelectItem value="__legacy__">规则内配置（请改选设置中的机器人）</SelectItem>
+            ) : null}
+          </SelectContent>
+        </Select>
         {channels.length === 0 ? (
           <FieldHint>
             命中后按分钟汇总推送，无变化不发送。请先到{" "}
@@ -424,6 +502,8 @@ export function RuleForm({
           {"{{type}} {{path}}"}
         </FieldHint>
       </div>
+        </>
+      )}
 
       <div className="flex w-full justify-end gap-2 border-t pt-3">
         <Button variant="outline" type="button" onClick={onCancel}>

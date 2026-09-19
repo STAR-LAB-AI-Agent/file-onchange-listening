@@ -19,13 +19,14 @@ from filewatch.config import (
     summarize_config,
 )
 from filewatch.models import EVENT_TYPES, STREAMS, FileEvent
-from filewatch.paths import sanitize_id
+from filewatch.paths import sanitize_id, slug_id
 from filewatch.process import pid_alive
 from filewatch.rules import RuleEngine
 from filewatch.runtime import WatchRuntime, new_id, utc_now
 from filewatch.service import (
     describe_watcher,
     list_watcher_payloads,
+    rename_watcher,
     start_watch,
     stop_watch,
 )
@@ -37,7 +38,9 @@ watch:
   path: ./inbox
   recursive: true
   debounce_ms: 400
-  line_diff_quiet_ms: 2000
+  line_diff_quiet_ms: 30000
+  line_diff_max_bytes: 262144
+  # record_all: false   # 仅记录命中正向规则的文件；省略或 true 则默认记录全部变化
   ignore:
     - "**/.git/**"
     - "**/__pycache__/**"
@@ -57,6 +60,11 @@ rules:
           mailbox: true
           # dingtalk: true   # 使用设置页默认钉钉渠道
           # 或 dingtalk: { channel: work }
+  # 反向规则：命中后不入账（文件变化和其它规则都不会触发）。record_all 为 true（默认）时仍会记录未排除的文件。
+  # - name: skip-logs
+  #   exclude: true
+  #   when:
+  #     glob: "**/*.log"
   # 取消注释后，docs 下 markdown 变化时启动内置智能体（调用设置页 LLM）。
   # - name: rewrite-docs-md
   #   when:
@@ -142,7 +150,11 @@ def _load_from_args(ns: argparse.Namespace) -> Config:
     if ns.config:
         return load_config(ns.config)
     if ns.path:
-        return config_from_path(ns.path, name=ns.id, recursive=not ns.no_recursive)
+        return config_from_path(
+            ns.path,
+            recursive=not ns.no_recursive,
+            record_all=not getattr(ns, "match_rules_only", False),
+        )
     raise ConfigError("必须提供 --config 或 --path")
 
 
@@ -190,6 +202,16 @@ def cmd_status(ns: argparse.Namespace) -> int:
         return err
     assert watch_id is not None
     return emit({"ok": True, **describe_watcher(_store(watch_id))}, pretty=pretty)
+
+
+def cmd_rename(ns: argparse.Namespace) -> int:
+    pretty = _pretty(ns)
+    watch_id, err = _resolve_id(ns.id, pretty)
+    if err is not None:
+        return err
+    assert watch_id is not None
+    payload = rename_watcher(watch_id, ns.name)
+    return emit(payload, 0 if payload.get("ok") else 1, pretty=pretty)
 
 
 def cmd_list(ns: argparse.Namespace) -> int:
@@ -262,12 +284,14 @@ def cmd_test_rule(ns: argparse.Namespace) -> int:
         is_dir=bool(ns.is_dir),
     )
     engine = RuleEngine(Path(config.watch.path), config.rules)
-    hits = engine.matches(event)
+    excluded = engine.exclude_hits(event)
+    hits = [] if excluded else engine.matches(event)
     return emit(
         {
             "ok": True,
             "event": event.to_dict(),
             "matched": [rule.name for rule in hits],
+            "excluded": [rule.name for rule in excluded],
             "count": len(hits),
         },
         pretty=pretty,
@@ -303,7 +327,7 @@ def cmd_reload(ns: argparse.Namespace) -> int:
         config = load_config(ns.config)
     except ConfigError as exc:
         return fail("bad_config", str(exc), pretty=pretty)
-    watch_id, err = _resolve_id(ns.id or config.name, pretty)
+    watch_id, err = _resolve_id(ns.id or slug_id(config.name), pretty)
     if err is not None:
         return err
     assert watch_id is not None
@@ -398,6 +422,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--path")
     start.add_argument("--id")
     start.add_argument("--no-recursive", action="store_true")
+    start.add_argument(
+        "--match-rules-only",
+        action="store_true",
+        help="仅记录命中正向规则的文件；默认记录目录下全部变化",
+    )
     start.set_defaults(func=cmd_start)
 
     run = sub.add_parser("run", help="在前台运行监听（供守护进程调用）")
@@ -415,6 +444,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     listed = sub.add_parser("list", help="列出已知的监听实例")
     listed.set_defaults(func=cmd_list)
+
+    rename_cmd = sub.add_parser("rename", help="修改监听任务的显示名称")
+    rename_cmd.add_argument("--id")
+    rename_cmd.add_argument("--name", required=True, help="新名称；空则恢复为文件夹名")
+    rename_cmd.set_defaults(func=cmd_rename)
 
     def add_stream_args(p: argparse.ArgumentParser) -> None:
         p.add_argument("--id")

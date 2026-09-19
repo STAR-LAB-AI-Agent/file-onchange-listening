@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from filewatch.linediff import load_line_changes_map, merge_line_changes
+from filewatch.linediff import is_noop_text_modified, load_line_changes_map, merge_line_changes
 from filewatch.paths import watcher_dir, watchers_root
 
 
@@ -27,6 +27,23 @@ def parse_event_ts(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _normalize_path_query(value: str) -> str:
+    return value.replace("\\", "/").casefold()
+
+
+def record_matches_path_query(record: dict[str, Any], query: str | None) -> bool:
+    if not query:
+        return True
+    needle = _normalize_path_query(query.strip())
+    if not needle:
+        return True
+    for key in ("path", "old_path"):
+        raw = record.get(key)
+        if isinstance(raw, str) and needle in _normalize_path_query(raw):
+            return True
+    return False
 
 
 class WatchStore:
@@ -156,6 +173,7 @@ class WatchStore:
         ts_from: str | None = None,
         ts_to: str | None = None,
         event_type: str | None = None,
+        path_query: str | None = None,
     ) -> dict[str, Any]:
         page_size = max(1, min(int(page_size), 500))
         page = max(1, int(page))
@@ -183,6 +201,8 @@ class WatchStore:
                     record = json.loads(stripped)
                     if event_type and record.get("type") != event_type:
                         continue
+                    if not record_matches_path_query(record, path_query):
+                        continue
                     if start_dt or end_dt:
                         ts = parse_event_ts(record.get("ts"))
                         if ts is None:
@@ -194,6 +214,7 @@ class WatchStore:
                     matched.append(record)
         if stream == "events":
             matched = self._merge_event_records(matched)
+            matched = [record for record in matched if not is_noop_text_modified(record)]
         matched.reverse()
         total = len(matched)
         pages = max(1, math.ceil(total / page_size)) if total else 1
