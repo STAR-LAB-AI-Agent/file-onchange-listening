@@ -34,11 +34,13 @@ file-onchange-listening/
 .cursor/skills/file-watch/
 ├── SKILL.md                 # Agent 调用协议（自然语言改规则、CLI 流程）
 ├── requirements.txt         # watchdog, PyYAML
-├── pack.cmd / pack.sh       # npm run build → zip
+├── pack.cmd / pack.sh       # npm run build → Cursor zip
+├── pack_nanobot.cmd / .sh   # npm run build → nanobot .skill
 ├── examples/watch.yaml      # 示例配置与注释
 ├── scripts/
 │   ├── filewatch_cli.py     # CLI 入口（不要改名为 filewatch.py）
 │   ├── pack_skill.py        # 构建 web/ 后打 dist/file-watch-<版本>.zip
+│   ├── pack_nanobot.py      # 构建 web/ 后打 dist/file-watch-<版本>.skill
 │   ├── test_watch_dir.py    # 真实目录实测
 │   ├── echo_agent.py        # agent.runner=command 示例
 │   └── filewatch/           # Python 实现包
@@ -216,7 +218,7 @@ FILEWATCH_HOME/
 | `test_nl_rules.py` `test_settings.py` `test_llm_wire.py` | 口语规则与 LLM 协议 |
 | `test_web.py` | HTTP API |
 | `test_agent_loop.py` `test_agent_tools.py` `test_builtin_runtime.py` `test_agent_logs.py` | 内置智能体 |
-| `test_pack_skill.py` `test_watch_dir_script.py` | 打包与实测脚本 |
+| `test_pack_skill.py` `test_pack_nanobot.py` `test_watch_dir_script.py` | 打包与实测脚本 |
 
 改监听 / 规则 / CLI 后跑 `pytest`。真目录再跑 `scripts/test_watch_dir.py`。
 

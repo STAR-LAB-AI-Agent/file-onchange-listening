@@ -7,13 +7,15 @@
 ```text
 .cursor/skills/file-watch/
   SKILL.md
-  pack.cmd / pack.sh      # 一键打包（先构建前端）
+  pack.cmd / pack.sh      # 一键打包 Cursor zip（先构建前端）
+  pack_nanobot.cmd / pack_nanobot.sh  # 打成 nanobot .skill
   requirements.txt
   examples/watch.yaml
   web/                    # shadcn + Vite 前端源码
   scripts/
     filewatch_cli.py      # CLI 入口
-    pack_skill.py         # 打包未构建 skill
+    pack_skill.py         # 打包 Cursor skill zip
+    pack_nanobot.py       # 打包 nanobot .skill
     filewatch/            # 实现
       webui/              # serve 构建产物
     test_watch_dir.py     # 实测脚本
@@ -29,6 +31,8 @@ pip install -r .cursor/skills/file-watch/requirements.txt
 ```
 
 把该 skill 目录拷到 `~/.cursor/skills/file-watch/` 后，个人环境也可直接用。仓库里的 `web/` 是未构建源码；分发前在 skill 目录双击 `pack.cmd`（或 `python scripts/pack_skill.py`），会先 `npm run build` 再打出 `dist/file-watch-<版本>.zip`。解压到 `.cursor/skills/` 即可安装。
+
+给 nanobot 用时双击 `pack_nanobot.cmd`（或 `python scripts/pack_nanobot.py`），打出 `dist/file-watch-<版本>.skill`。把它当 zip 解压到 nanobot 工作区 `skills/`，得到 `file-watch/`（依赖改为 `pip install -r scripts/requirements.txt`）。
 
 ## 快速开始
 

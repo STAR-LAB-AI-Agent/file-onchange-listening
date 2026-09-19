@@ -355,3 +355,11 @@ python scripts/pack_skill.py
 ```
 
 Windows 也可双击 `pack.cmd`。脚本会 `npm install` + `npm run build`，然后打出 `dist/file-watch-<版本>.zip`（不含 `node_modules`）。把 zip 解压到 `.cursor/skills/` 得到 `file-watch/`。已构建过、只想重新打 zip 时加 `--skip-build`。不要前端源码时加 `--no-web-src`。
+
+打给 nanobot 时用：
+
+```bash
+python scripts/pack_nanobot.py
+```
+
+Windows 也可双击 `pack_nanobot.cmd`。产出 `dist/file-watch-<版本>.skill`（zip，根目录只有 `SKILL.md` / `scripts/` / `references/`）。解压到 nanobot 工作区 `skills/` 得到 `file-watch/`。已构建过可加 `--skip-build`。
