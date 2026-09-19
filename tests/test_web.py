@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from filewatch.config import config_to_dict, parse_config_dict
 from filewatch.store import WatchStore
@@ -258,6 +259,53 @@ def test_web_events_page_and_time_range(tmp_path: Path, monkeypatch) -> None:
         httpd.server_close()
 
 
+def test_web_frequent_files_and_exclude_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    noisy = inbox / "app.log"
+    other = inbox / "trace.log"
+    store = _seed_watcher(
+        "inbox",
+        inbox,
+        {"id": "seed", "type": "created", "path": str(inbox / "a.txt"), "ts": "2026-01-01T00:00:00Z"},
+    )
+    now = datetime.now(timezone.utc)
+    for index in range(6):
+        ts = (now - timedelta(seconds=index)).isoformat()
+        store.append("events", {"id": f"a{index}", "type": "modified", "path": str(noisy), "ts": ts})
+        store.append("events", {"id": f"b{index}", "type": "modified", "path": str(other), "ts": ts})
+
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&frequent=1")
+        assert status == 200
+        rels = {item["rel"] for item in data.get("frequent") or []}
+        assert rels == {"app.log", "trace.log"}
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1")
+        assert status == 200
+        assert "frequent" not in data
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/exclude-paths",
+            {"paths": [str(noisy), str(other)]},
+        )
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert payload["rule"] == "skip-frequent"
+        assert payload["globs"] == ["app.log", "trace.log"]
+        assert payload["config"]["rules"][0]["exclude"] is True
+        status, data = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/events?page=1&frequent=1")
+        assert status == 200
+        assert data.get("frequent") == []
+        status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/inbox/exclude-paths", {"paths": []})
+        assert status == 400
+        assert payload["error"] == "bad_request"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_web_rules_manual_and_natural_language(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
@@ -495,6 +543,7 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
         assert payload["watch"]["debounce_ms"] == 400
         assert payload["watch"]["line_diff_quiet_ms"] == 30_000
         assert payload["watch"]["line_diff_max_bytes"] == 256 * 1024
+        assert payload["logs"]["keep_days"] == 14
         status, payload = _put(
             f"http://127.0.0.1:{port}/api/settings",
             {"llm": {"api_key": "sk-test-key-9999", "model": "demo", "base_url": "https://example.invalid/v1"}},
@@ -658,6 +707,31 @@ def test_web_saves_watch_timing_to_existing_task(tmp_path: Path, monkeypatch) ->
         assert config["config"]["watch"]["debounce_ms"] == 180
         assert config["config"]["watch"]["line_diff_quiet_ms"] == 45000
         assert config["config"]["watch"]["line_diff_max_bytes"] == 512000
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_saves_log_keep_days_and_prunes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("FILEWATCH_LOG_KEEP_DAYS", raising=False)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _put(f"http://127.0.0.1:{port}/api/settings", {"logs": {"keep_days": 5}})
+        assert status == 200, payload
+        assert payload["logs"]["keep_days"] == 5
+        assert payload["pruned_watchers"][0]["watch_id"] == "inbox"
+        status, again = _get(f"http://127.0.0.1:{port}/api/settings")
+        assert status == 200
+        assert again["logs"]["keep_days"] == 5
+        status, bad = _put(f"http://127.0.0.1:{port}/api/settings", {"logs": {"keep_days": 0}})
+        assert status == 400
+        assert bad["error"] == "bad_request"
     finally:
         httpd.shutdown()
         httpd.server_close()

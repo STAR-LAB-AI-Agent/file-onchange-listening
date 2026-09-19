@@ -33,6 +33,7 @@ import {
 const DEFAULT_DEBOUNCE_MS = 400
 const DEFAULT_LINE_DIFF_QUIET_MS = 30_000
 const DEFAULT_LINE_DIFF_MAX_BYTES = 256 * 1024
+const DEFAULT_LOG_KEEP_DAYS = 14
 const OPENAI_DEFAULT_URL = "https://api.openai.com/v1"
 const ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com/v1"
 
@@ -115,6 +116,7 @@ export function SettingsPage() {
   const [debounceMs, setDebounceMs] = useState(String(DEFAULT_DEBOUNCE_MS))
   const [lineDiffQuietSeconds, setLineDiffQuietSeconds] = useState(String(DEFAULT_LINE_DIFF_QUIET_MS / 1000))
   const [lineDiffMaxKb, setLineDiffMaxKb] = useState(String(DEFAULT_LINE_DIFF_MAX_BYTES / 1024))
+  const [logKeepDays, setLogKeepDays] = useState(String(DEFAULT_LOG_KEEP_DAYS))
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -133,6 +135,7 @@ export function SettingsPage() {
     setDebounceMs(String(debounce ?? DEFAULT_DEBOUNCE_MS))
     setLineDiffQuietSeconds(String((quiet ?? DEFAULT_LINE_DIFF_QUIET_MS) / 1000))
     setLineDiffMaxKb(String((maxBytes ?? DEFAULT_LINE_DIFF_MAX_BYTES) / 1024))
+    setLogKeepDays(String(data.logs?.keep_days ?? DEFAULT_LOG_KEEP_DAYS))
   }
 
   function applyLlm(data: AppSettings) {
@@ -326,24 +329,42 @@ export function SettingsPage() {
     }
     const quietMs = Math.round(quietSeconds * 1000)
     const maxBytes = maxKb * 1024
+    const keepDays = Number(logKeepDays)
+    if (!Number.isFinite(keepDays) || keepDays < 1 || keepDays > 365 || !Number.isInteger(keepDays)) {
+      setError("日志保留天数必须是 1 到 365 的整数")
+      return
+    }
     setSaving(true)
     setError(null)
     setMessage(null)
     try {
-      const data = await api<AppSettings & { message?: string; applied_watchers?: unknown[] }>("/api/settings", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          watch: {
-            debounce_ms: debounce,
-            line_diff_quiet_ms: quietMs,
-            line_diff_max_bytes: maxBytes,
-          },
-        }),
-      })
+      const data = await api<AppSettings & { message?: string; applied_watchers?: unknown[]; pruned_watchers?: unknown[] }>(
+        "/api/settings",
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            watch: {
+              debounce_ms: debounce,
+              line_diff_quiet_ms: quietMs,
+              line_diff_max_bytes: maxBytes,
+            },
+            logs: { keep_days: keepDays },
+          }),
+        },
+      )
       applyWatch(data)
       const applied = Array.isArray(data.applied_watchers) ? data.applied_watchers.length : 0
-      setMessage(applied > 0 ? `监听时机已保存，已应用到 ${applied} 个任务` : data.message || "监听时机已保存")
+      const pruned = Array.isArray(data.pruned_watchers) ? data.pruned_watchers.length : 0
+      if (applied > 0 && pruned > 0) {
+        setMessage(`已保存，并应用到 ${applied} 个任务；已按 ${keepDays} 天清理 ${pruned} 个任务的过期日志`)
+      } else if (applied > 0) {
+        setMessage(`监听时机已保存，已应用到 ${applied} 个任务`)
+      } else if (pruned > 0) {
+        setMessage(`日志保留 ${keepDays} 天已保存，并清理了 ${pruned} 个任务的过期文件`)
+      } else {
+        setMessage(data.message || "监听与日志设置已保存")
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败")
     } finally {
@@ -365,7 +386,7 @@ export function SettingsPage() {
             设置
           </h1>
           <p className="text-sm text-muted-foreground">
-            LLM 用于自然语言添加和编辑规则；钉钉机器人供规则下拉选择。事件入账、行级快照等待和最大文件也可在此调整。凭证保存在本机状态目录，不会写入被监听的文件夹。
+            LLM 用于自然语言添加和编辑规则；钉钉机器人供规则下拉选择。事件入账、行级快照、日志保留天数也可在此调整。凭证保存在本机状态目录，不会写入被监听的文件夹。
           </p>
         </div>
         <Button type="button" variant="outline" size="sm" onClick={() => navigate("/")}>
@@ -465,9 +486,9 @@ export function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>监听时机</CardTitle>
+          <CardTitle>监听与日志</CardTitle>
           <CardDescription>
-            事件入账：同一文件连续变化时，安静这么久再记一条。行级快照：入账后再等这么久才计算增减行；超过最大文件则跳过行级对比。保存后写入本机设置，并应用到已有任务。
+            事件入账：同一文件连续变化时，安静这么久再记一条。行级快照：入账后再等这么久才计算增减行；超过最大文件则跳过行级对比。日志保留：按天切分的邮箱、守护进程日志和已结束的智能体日志超过天数即删除。保存后写入本机设置，并立刻应用到已有任务。
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -507,9 +528,23 @@ export function SettingsPage() {
               placeholder={String(DEFAULT_LINE_DIFF_MAX_BYTES / 1024)}
             />
           </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="log-keep-days">日志保留（天）</Label>
+            <Input
+              id="log-keep-days"
+              type="number"
+              min={1}
+              max={365}
+              step={1}
+              value={logKeepDays}
+              onChange={(event) => setLogKeepDays(event.target.value)}
+              placeholder={String(DEFAULT_LOG_KEEP_DAYS)}
+            />
+            <p className="text-xs text-muted-foreground">文件变化、任务邮箱、守护进程日志和已结束的智能体记录，超过该天数会删除。范围 1–365，默认 14。</p>
+          </div>
           <div>
             <Button type="button" onClick={() => void saveWatch()} disabled={saving}>
-              保存监听时机
+              保存监听与日志
             </Button>
           </div>
         </CardContent>

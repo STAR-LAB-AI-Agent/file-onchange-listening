@@ -24,6 +24,13 @@ export type FileEvent = {
   line_changes?: LineChanges | null
 }
 
+export type FrequentFile = {
+  path: string
+  rel?: string
+  count?: number
+  window_seconds?: number
+}
+
 export type DingTalkAction = {
   channel?: string | null
   webhook?: string | null
@@ -106,6 +113,7 @@ export type WatcherInfo = {
   rules?: string[]
   last_event?: FileEvent | null
   items?: FileEvent[]
+  frequent?: FrequentFile[]
   cursor?: number
   page?: number
   page_size?: number
@@ -439,10 +447,15 @@ export type WatchTimingSettings = {
   line_diff_max_bytes?: number
 }
 
+export type LogSettings = {
+  keep_days?: number
+}
+
 export type AppSettings = {
   llm: LlmSettings
   dingtalk?: { channels?: DingTalkChannel[] }
   watch?: WatchTimingSettings
+  logs?: LogSettings
 }
 
 export function dingtalkSelection(ding: NotifyAction["dingtalk"] | undefined): string {

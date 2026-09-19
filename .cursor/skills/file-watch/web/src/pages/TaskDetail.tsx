@@ -24,6 +24,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { FrequentExcludePanel } from "@/components/FrequentExcludePanel"
 import {
   TYPE_LABEL,
   api,
@@ -31,6 +32,7 @@ import {
   relPath,
   typeBadgeClass,
   type FileEvent,
+  type FrequentFile,
   type LineChanges,
   type WatcherInfo,
 } from "@/lib/api"
@@ -44,6 +46,26 @@ const FILTERS = [
 ]
 
 const PAGE_SIZE = 100
+
+function dismissedStorageKey(watchId: string) {
+  return `filewatch:dismiss-frequent:${watchId}`
+}
+
+function loadDismissed(watchId: string): Set<string> {
+  try {
+    const raw = sessionStorage.getItem(dismissedStorageKey(watchId))
+    if (!raw) return new Set()
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((item): item is string => typeof item === "string" && Boolean(item)))
+  } catch {
+    return new Set()
+  }
+}
+
+function saveDismissed(watchId: string, paths: Set<string>) {
+  sessionStorage.setItem(dismissedStorageKey(watchId), JSON.stringify([...paths]))
+}
 const SKIP_REASON: Record<string, string> = {
   binary: "二进制，无行级变化",
   too_large: "文件过大，未做行级对比",
@@ -124,7 +146,15 @@ export function TaskDetail({ watchId }: { watchId: string }) {
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [frequent, setFrequent] = useState<FrequentFile[]>([])
+  const [dismissed, setDismissed] = useState<Set<string>>(() => loadDismissed(watchId))
+  const [excluding, setExcluding] = useState(false)
   const cursorRef = useRef(0)
+
+  useEffect(() => {
+    setDismissed(loadDismissed(watchId))
+    setFrequent([])
+  }, [watchId])
 
   useEffect(() => {
     const next = pathQuery.trim()
@@ -146,6 +176,7 @@ export function TaskDetail({ watchId }: { watchId: string }) {
     if (pathSearch) params.set("q", pathSearch)
     if (tsFrom) params.set("ts_from", toFromIso(tsFrom))
     if (tsTo) params.set("ts_to", toToIso(tsTo))
+    params.set("frequent", "1")
     return api<WatcherInfo>(`/api/watchers/${encodeURIComponent(watchId)}/events?${params.toString()}`)
   }, [filter, page, pathSearch, tsFrom, tsTo, watchId])
 
@@ -156,6 +187,7 @@ export function TaskDetail({ watchId }: { watchId: string }) {
       setInfo(data)
       setPages(data.pages || 1)
       setTotal(data.total || 0)
+      if (Array.isArray(data.frequent)) setFrequent(data.frequent)
       if (data.page && data.page !== page) setPage(data.page)
     },
     [page],
@@ -175,11 +207,12 @@ export function TaskDetail({ watchId }: { watchId: string }) {
     const timer = window.setInterval(async () => {
       try {
         const live = await api<WatcherInfo>(
-          `/api/watchers/${encodeURIComponent(watchId)}/events?since=${cursorRef.current}&limit=100`,
+          `/api/watchers/${encodeURIComponent(watchId)}/events?since=${cursorRef.current}&limit=100&frequent=1`,
         )
         if (cancelled) return
         if (live.cursor) cursorRef.current = live.cursor
         setInfo(live)
+        if (Array.isArray(live.frequent)) setFrequent(live.frequent)
         // Refresh page 1 so settled line_changes (sidecar) appear without a new event.
         if (page === 1 || (live.items && live.items.length)) {
           const data = await loadPage()
@@ -226,7 +259,43 @@ export function TaskDetail({ watchId }: { watchId: string }) {
     }
   }
 
+  async function excludeFrequent(paths: string[]) {
+    if (!paths.length) return
+    setExcluding(true)
+    setError(null)
+    try {
+      await api(`/api/watchers/${encodeURIComponent(watchId)}/exclude-paths`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths }),
+      })
+      setDismissed((current) => {
+        const next = new Set(current)
+        for (const path of paths) next.add(path)
+        saveDismissed(watchId, next)
+        return next
+      })
+      setFrequent((current) => current.filter((item) => !paths.includes(item.path)))
+      applyPage(await loadPage())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加入排除规则失败")
+    } finally {
+      setExcluding(false)
+    }
+  }
+
+  function dismissFrequent() {
+    const paths = frequent.map((item) => item.path).filter(Boolean)
+    setDismissed((current) => {
+      const next = new Set(current)
+      for (const path of paths) next.add(path)
+      saveDismissed(watchId, next)
+      return next
+    })
+  }
+
   const watchPath = info?.path || undefined
+  const frequentVisible = frequent.filter((item) => item.path && !dismissed.has(item.path))
   const hasRange = Boolean(tsFrom || tsTo)
   const hasFilters = hasRange || filter !== "all" || Boolean(pathSearch)
   const emptyHint = hasFilters
@@ -352,6 +421,15 @@ export function TaskDetail({ watchId }: { watchId: string }) {
           </div>
         </div>
       </div>
+
+      {frequentVisible.length ? (
+        <FrequentExcludePanel
+          items={frequentVisible}
+          saving={excluding}
+          onExclude={(paths) => void excludeFrequent(paths)}
+          onDismiss={dismissFrequent}
+        />
+      ) : null}
 
       <Card size="sm">
         <CardHeader className="border-b">

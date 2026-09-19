@@ -22,9 +22,11 @@ from filewatch.service import (
     apply_rules_from_text,
     apply_watch_timing,
     describe_watcher,
+    exclude_frequent_paths,
     list_watcher_payloads,
     preview_edit_rule_from_text,
     preview_rules_from_text,
+    prune_rotated_logs,
     read_stream,
     rename_watcher,
     save_rules,
@@ -97,7 +99,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
                 return
             store = store_for(watch_id)
-            if not store.config_path.exists() and not store.events_path.exists():
+            if not store.config_path.exists() and not store.has_records("events"):
                 self._json(404, {"ok": False, "error": "not_found", "message": f"没有找到监听 {watch_id}"})
                 return
             self._json(200, {"ok": True, **describe_watcher(store)})
@@ -109,7 +111,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
                 return
             store = store_for(watch_id)
-            if not store.config_path.exists() and not store.events_path.exists():
+            if not store.config_path.exists() and not store.has_records("events"):
                 self._json(404, {"ok": False, "error": "not_found", "message": f"没有找到监听 {watch_id}"})
                 return
             since = _int_arg(query, "since")
@@ -122,6 +124,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             ts_to = _str_arg(query, "ts_to")
             event_type = _str_arg(query, "type")
             path_query = _str_arg(query, "q")
+            include_frequent = _bool_arg(query, "frequent")
             if event_type == "all":
                 event_type = None
             if event_type and event_type not in EVENT_TYPES:
@@ -139,6 +142,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                 ts_to=ts_to,
                 event_type=event_type,
                 path_query=path_query,
+                include_frequent=include_frequent,
             )
             self._json(200 if payload.get("ok") else 400, payload)
             return
@@ -238,6 +242,10 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         if match:
             self._handle_save_rules(match.group(1), data)
             return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/exclude-paths", path)
+        if match:
+            self._handle_exclude_paths(match.group(1), data)
+            return
         match = re.fullmatch(r"/api/watchers/([^/]+)/rename", path)
         if match:
             self._handle_rename(match.group(1), data)
@@ -262,6 +270,9 @@ class WatchWebHandler(BaseHTTPRequestHandler):
                     int(timing.get("line_diff_max_bytes", DEFAULT_LINE_DIFF_MAX_BYTES)),
                 )
                 payload["applied_watchers"] = applied.get("watchers") or []
+            if payload.get("ok") and isinstance(data.get("logs"), dict):
+                pruned = prune_rotated_logs()
+                payload["pruned_watchers"] = pruned.get("watchers") or []
             self._json(200 if payload.get("ok") else 400, payload)
             return
         match = re.fullmatch(r"/api/watchers/([^/]+)/watch", path)
@@ -283,7 +294,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
             return None
         store = store_for(watch_id)
-        if not store.config_path.exists() and not store.events_path.exists():
+        if not store.config_path.exists() and not store.has_records("events"):
             self._json(404, {"ok": False, "error": "not_found", "message": f"没有找到监听 {watch_id}"})
             return None
         return store
@@ -387,6 +398,16 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
             return
         payload = save_rules(watch_id, data.get("rules"))
+        code = 200 if payload.get("ok") else 400
+        if payload.get("error") == "not_found":
+            code = 404
+        self._json(code, payload)
+
+    def _handle_exclude_paths(self, watch_id: str, data: dict[str, Any]) -> None:
+        if not ID_RE.fullmatch(watch_id):
+            self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
+            return
+        payload = exclude_frequent_paths(watch_id, data.get("paths"))
         code = 200 if payload.get("ok") else 400
         if payload.get("error") == "not_found":
             code = 404

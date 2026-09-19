@@ -11,10 +11,21 @@ from pathlib import Path
 from typing import Any
 
 from filewatch.config import Config, ConfigError, config_from_path, config_to_dict, folder_title, normalize_watch_name, parse_config_dict, summarize_config
+from filewatch.frequent import (
+    RULE_NAME,
+    TAIL_LIMIT,
+    TAIL_MAX_BYTES,
+    WINDOW_SECONDS,
+    collect_frequent_files,
+    event_rel,
+    exclude_rule_dict,
+    unique_rule_name,
+)
 from filewatch.models import STREAMS
 from filewatch.nl_rules import edit_rule_from_text, merge_rules, rules_from_text
 from filewatch.paths import sanitize_id, slug_id, state_root
 from filewatch.process import pid_alive, spawn_detached, terminate_pid
+from filewatch.rules import RuleEngine
 from filewatch.store import WatchStore, list_stores
 
 
@@ -61,7 +72,7 @@ def describe_watcher(store: WatchStore) -> dict[str, Any]:
     title = watcher_title(store, config)
     last_event = None
     event_count = 0
-    if store.events_path.exists():
+    if store.has_records("events"):
         event_count = store.record_count("events")
         tail, _ = store.read_tail("events", limit=1)
         if tail:
@@ -78,8 +89,8 @@ def describe_watcher(store: WatchStore) -> dict[str, Any]:
         "rule_count": len(config.rules) if config else 0,
         "event_count": event_count,
         "last_event": last_event,
-        "pending_events": store.pending_count("events") if store.events_path.exists() else 0,
-        "pending_jobs": store.pending_count("jobs") if store.jobs_path.exists() else 0,
+        "pending_events": store.pending_count("events") if store.has_records("events") else 0,
+        "pending_jobs": store.pending_count("jobs") if store.has_records("jobs") else 0,
         "cursors": store.read_cursors() if store.cursors_path.exists() else {},
         "home": str(store.dir),
     }
@@ -172,9 +183,7 @@ def start_watch(config: Config, watch_id: str | None = None) -> dict[str, Any]:
                 "home": str(state_root()),
             }
         time.sleep(0.1)
-    log_tail = ""
-    if store.log_path.exists():
-        log_tail = store.log_path.read_text(encoding="utf-8")[-2000:]
+    log_tail = store.read_log_tail(2000)
     return {
         "ok": False,
         "error": "start_failed",
@@ -287,6 +296,7 @@ def read_stream(
     ts_to: str | None = None,
     event_type: str | None = None,
     path_query: str | None = None,
+    include_frequent: bool = False,
 ) -> dict[str, Any]:
     if stream not in STREAMS:
         return {"ok": False, "error": "bad_stream", "message": f"stream 必须是 {STREAMS} 之一"}
@@ -306,7 +316,7 @@ def read_stream(
             field = str(exc)
             return {"ok": False, "error": "bad_request", "message": f"{field} 不是有效时间"}
         items = queried["items"]
-        return {
+        payload = {
             "ok": True,
             "watch_id": sanitize_id(watch_id),
             "stream": stream,
@@ -321,6 +331,9 @@ def read_stream(
             "total": queried["total"],
             **describe_watcher(store),
         }
+        if include_frequent and stream == "events":
+            payload["frequent"] = list_frequent_files(store)
+        return payload
     if tail and since is None:
         items, cursor = store.read_tail(stream, limit=limit)
         since = 0
@@ -330,7 +343,7 @@ def read_stream(
         items, cursor = store.read_since(stream, offset, limit)
         timed_out = not items
         since = offset
-    return {
+    payload = {
         "ok": True,
         "watch_id": sanitize_id(watch_id),
         "stream": stream,
@@ -341,6 +354,71 @@ def read_stream(
         "items": items,
         **describe_watcher(store),
     }
+    if include_frequent and stream == "events":
+        payload["frequent"] = list_frequent_files(store)
+    return payload
+
+
+def list_frequent_files(store: WatchStore) -> list[dict[str, Any]]:
+    records, _ = store.read_tail("events", limit=TAIL_LIMIT, max_bytes=TAIL_MAX_BYTES)
+    config = None
+    try:
+        config = load_saved_config(store)
+    except (ConfigError, json.JSONDecodeError, OSError):
+        config = None
+    root = Path(config.watch.path) if config else None
+    engine = None
+    if config is not None:
+        try:
+            engine = RuleEngine(root or Path(config.watch.path), config.rules)
+        except OSError:
+            engine = None
+    return collect_frequent_files(
+        records,
+        root=root,
+        engine=engine,
+        watch_id=store.watch_id,
+    )
+
+
+def exclude_frequent_paths(watch_id: str, paths_raw: Any, *, timeout: float = 8.0) -> dict[str, Any]:
+    watch_id = sanitize_id(watch_id)
+    store = store_for(watch_id)
+    if not store.config_path.exists():
+        return _missing_watcher(watch_id)
+    if not isinstance(paths_raw, list) or not paths_raw:
+        return {"ok": False, "error": "bad_request", "message": "必须提供要排除的路径列表"}
+    paths: list[str] = []
+    for item in paths_raw:
+        if not isinstance(item, str) or not item.strip():
+            return {"ok": False, "error": "bad_request", "message": "路径必须是非空字符串"}
+        paths.append(item.strip())
+    saved = load_saved_config(store)
+    if saved is None:
+        return {"ok": False, "error": "bad_config", "message": "配置无法读取"}
+    root = Path(saved.watch.path)
+    globs: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        rel = event_rel(root, path)
+        if not rel or rel == ".":
+            continue
+        if rel not in seen:
+            seen.add(rel)
+            globs.append(rel)
+    if not globs:
+        return {"ok": False, "error": "bad_request", "message": "没有可排除的文件路径"}
+    raw = config_to_dict(saved)
+    existing = list(raw.get("rules") or [])
+    taken = {str(rule.get("name")) for rule in existing if isinstance(rule, dict) and rule.get("name")}
+    name = unique_rule_name(RULE_NAME, taken)
+    existing.append(exclude_rule_dict(name, globs))
+    result = save_rules(watch_id, existing, timeout=timeout)
+    if result.get("ok"):
+        result["rule"] = name
+        result["globs"] = globs
+        result["window_seconds"] = WINDOW_SECONDS
+    return result
 
 
 def _missing_watcher(watch_id: str) -> dict[str, Any]:
@@ -626,6 +704,14 @@ def apply_watch_timing(
                 "message": result.get("message"),
             }
         )
+    return {"ok": True, "watchers": applied}
+
+
+def prune_rotated_logs() -> dict[str, Any]:
+    applied: list[dict[str, Any]] = []
+    for store in list_stores():
+        store.prune_rotated()
+        applied.append({"watch_id": store.watch_id, "home": str(store.dir)})
     return {"ok": True, "watchers": applied}
 
 
