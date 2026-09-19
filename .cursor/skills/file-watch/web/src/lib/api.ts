@@ -308,14 +308,82 @@ export function navigate(to: string) {
   window.dispatchEvent(new PopStateEvent("popstate"))
 }
 
-export type TaskPage = "events" | "rules"
+export type TaskPage = "events" | "rules" | "agent"
+
+export type AgentLogEvent = {
+  kind: string
+  seq?: number
+  session?: number
+  job_id?: string
+  ts?: string
+  text?: string | null
+  source?: string
+  command?: string
+  output?: string
+  exit_code?: number
+  tool?: string
+  role?: string
+  traceback?: string
+  duration_ms?: number
+  input?: number
+  output_tokens?: number
+  cached?: number
+  total?: number
+  session_start?: boolean
+}
+
+export type AgentLogJob = {
+  job_id?: string
+  session?: number
+  status?: string
+  rule?: string | null
+  path?: string | null
+  type?: string | null
+  ts?: string | null
+}
+
+export type AgentLogStat = {
+  rule?: string
+  run_count?: number
+  running?: boolean
+  last_status?: string | null
+  last_ts?: string | null
+  last_path?: string | null
+}
+
+export type AgentLogPage = {
+  ok?: boolean
+  events?: AgentLogEvent[]
+  session?: number
+  session_count?: number
+  job?: AgentLogJob | null
+  running?: boolean
+  offset?: number
+  oldest?: number
+  has_older?: boolean
+  total?: number
+  file_end?: number
+  watch_id?: string
+  rule?: string | null
+  stats?: AgentLogStat[]
+}
+
+export type TaskRoute = { watchId: string; page: TaskPage; ruleName?: string }
 
 export type AppRoute =
   | { kind: "list" }
   | { kind: "settings" }
-  | { kind: "task"; watchId: string; page: TaskPage }
+  | { kind: "task"; watchId: string; page: TaskPage; ruleName?: string }
 
-export function parseTaskRoute(pathname: string): { watchId: string; page: TaskPage } | null {
+export function parseTaskRoute(pathname: string): TaskRoute | null {
+  const agent = pathname.match(/^\/tasks\/([^/]+)\/agent(?:\/([^/]+))?\/?$/)
+  if (agent) {
+    return {
+      watchId: decodeURIComponent(agent[1]),
+      page: "agent",
+      ruleName: agent[2] ? decodeURIComponent(agent[2]) : undefined,
+    }
+  }
   const match = pathname.match(/^\/tasks\/([^/]+)(?:\/(rules))?\/?$/)
   if (!match) return null
   return {
@@ -328,13 +396,29 @@ export function parseAppRoute(pathname: string): AppRoute {
   const clean = pathname.replace(/\/+$/, "") || "/"
   if (clean === "/settings") return { kind: "settings" }
   const task = parseTaskRoute(pathname)
-  if (task) return { kind: "task", watchId: task.watchId, page: task.page }
+  if (task) return { kind: "task", watchId: task.watchId, page: task.page, ruleName: task.ruleName }
   return { kind: "list" }
 }
+
+export function agentPrompt(rule: WatchRule | null | undefined): string {
+  if (!rule || rule.exclude) return ""
+  for (const action of rule.then || []) {
+    const prompt = action.agent?.prompt?.trim()
+    if (prompt) return prompt
+  }
+  return ""
+}
+
+export function hasAgentPrompt(rule: WatchRule | null | undefined): boolean {
+  return Boolean(agentPrompt(rule))
+}
+
+export type LlmWireApi = "chat" | "responses" | "anthropic"
 
 export type LlmSettings = {
   base_url?: string
   model?: string
+  wire_api?: LlmWireApi
   api_key_set?: boolean
   api_key_masked?: string
 }

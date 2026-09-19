@@ -382,13 +382,25 @@ def cmd_reload(ns: argparse.Namespace) -> int:
 
 def cmd_serve(ns: argparse.Namespace) -> int:
     pretty = _pretty(ns)
-    from filewatch.web import create_server
+    from filewatch.web import clear_serve_state, create_server
 
-    httpd = create_server(ns.host, int(ns.port))
+    try:
+        httpd = create_server(ns.host, int(ns.port))
+    except OSError as exc:
+        return fail("port_in_use", f"无法占用端口：{exc}", pretty=pretty, port=int(ns.port))
     host, port = httpd.server_address[:2]
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     url = f"http://{display_host}:{port}/"
-    emit({"ok": True, "url": url, "host": host, "port": port}, pretty=pretty)
+    emit(
+        {
+            "ok": True,
+            "url": url,
+            "host": host,
+            "port": port,
+            "replaced_pids": getattr(httpd, "replaced_pids", []),
+        },
+        pretty=pretty,
+    )
     sys.stdout.flush()
     if ns.open:
         import webbrowser
@@ -399,6 +411,7 @@ def cmd_serve(ns: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("已停止 Web 服务", file=sys.stderr)
     finally:
+        clear_serve_state(os.getpid())
         httpd.server_close()
     return 0
 

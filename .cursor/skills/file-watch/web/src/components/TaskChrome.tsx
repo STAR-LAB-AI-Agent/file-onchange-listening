@@ -148,11 +148,14 @@ export function TaskChrome({
 
       <Tabs
         value={page}
-        onValueChange={(value) => navigate(value === "rules" ? `${base}/rules` : base)}
+        onValueChange={(value) =>
+          navigate(value === "rules" ? `${base}/rules` : value === "agent" ? `${base}/agent` : base)
+        }
       >
         <TabsList>
           <TabsTrigger value="events">文件变化</TabsTrigger>
           <TabsTrigger value="rules">监听规则</TabsTrigger>
+          <TabsTrigger value="agent">智能体</TabsTrigger>
         </TabsList>
       </Tabs>
 

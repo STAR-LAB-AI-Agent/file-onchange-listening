@@ -130,10 +130,16 @@ def test_agent_loop_mock_tools(tmp_path: Path) -> None:
     assert (tmp_path / "a.md").read_text(encoding="utf-8") == "new"
     assert (tmp_path / "logs" / "job_loop.jsonl").exists()
     lines = (tmp_path / "logs" / "job_loop.jsonl").read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["tool"] == "Write"
-    assert entry["ok"] is True
+    entries = [json.loads(line) for line in lines]
+    kinds = [item.get("kind") for item in entries]
+    assert "system" in kinds
+    assert "agent" in kinds
+    write = next(item for item in entries if item.get("tool") == "Write")
+    assert write["ok"] is True
+    assert write["kind"] == "cmd"
+    index = json.loads((tmp_path / "logs" / "index.json").read_text(encoding="utf-8"))
+    assert index["jobs"][0]["job_id"] == "job_loop"
+    assert index["jobs"][0]["status"] == "ok"
 
 
 def test_agent_loop_llm_not_configured(tmp_path: Path) -> None:

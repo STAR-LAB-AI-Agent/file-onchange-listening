@@ -8,7 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from filewatch.linediff import is_noop_text_modified, load_line_changes_map, merge_line_changes
+from filewatch.linediff import (
+    drop_superseded_pending_modified,
+    is_noop_text_modified,
+    load_line_changes_map,
+    merge_line_changes,
+)
 from filewatch.paths import watcher_dir, watchers_root
 
 
@@ -214,6 +219,7 @@ class WatchStore:
                     matched.append(record)
         if stream == "events":
             matched = self._merge_event_records(matched)
+            matched = drop_superseded_pending_modified(matched)
             matched = [record for record in matched if not is_noop_text_modified(record)]
         matched.reverse()
         total = len(matched)

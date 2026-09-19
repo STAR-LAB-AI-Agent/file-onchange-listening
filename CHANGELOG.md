@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 2.1.2 - 2026-09-19
+
+### 修改
+
+- `serve` 启动时结束同端口上的旧进程，只保留本次实例。
+- 文件变化列表不再显示「行级结算中…」；同路径后续事件会替换未结算的中间修改，安静窗口结束后直接出现行级结果。
+
+### 新增
+
+- 网页任务详情新增「智能体」页：先按填写了任务要求的规则筛选，点进某条后再看该规则的 SSE 实时日志轮（时间、system / user / agent / 工具命令，可展开）。
+- 设置页钉钉渠道可「发送测试」：立刻向该群机器人推一条测试消息，用于核对 Webhook / SEC。
+- 设置页 LLM 支持三种协议：OpenAI Chat Completions、OpenAI Responses、Anthropic Messages。`settings.json` 的 `llm.wire_api` 为 `chat` / `responses` / `anthropic`（缺省 `chat`，旧配置无需改动）；也可用环境变量 `FILEWATCH_LLM_WIRE_API`。自然语言生成规则和内置智能体都走同一套转换，内部仍按 Chat Completions 形状处理工具调用。
+- 设置页可从常见国产 / 官方端点列表一键填入接口地址和示例模型（Chat Completions 含智谱、DeepSeek、百炼、Kimi 等；另有 Anthropic Messages 与 Responses 端点）。
+
 ## 2.1.1 - 2026-09-19
 
 ### 新增
@@ -29,7 +43,7 @@
 - 可读文本的行级变化：事件仍按 `watch.debounce_ms` 入账；`watch.line_diff_quiet_ms`（默认 2 秒）后再结算 `line_changes`（`+N / −M`）。二进制、过大或尚无基线为 `skipped`，结算前为 `pending`。规则匹配仍按文件级。
 - 网页任务详情可展开查看增减行。
 
-## 2.0.6 - 2026-09-17
+## 2.0.1 - 2026-09-17
 
 ### 新增
 

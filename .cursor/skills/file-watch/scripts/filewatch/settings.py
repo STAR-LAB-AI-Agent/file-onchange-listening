@@ -19,6 +19,17 @@ from filewatch.paths import sanitize_id, state_root
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_WIRE_API = "chat"
+WIRE_APIS = frozenset({"chat", "responses", "anthropic"})
+WIRE_ALIASES = {
+    "messages": "anthropic",
+    "claude": "anthropic",
+    "response": "responses",
+    "openai-responses": "responses",
+    "openai": "chat",
+    "chat-completions": "chat",
+    "completions": "chat",
+}
 
 
 @dataclass(frozen=True)
@@ -26,10 +37,25 @@ class LlmConfig:
     base_url: str
     api_key: str
     model: str
+    wire_api: str = DEFAULT_WIRE_API
 
     @property
     def configured(self) -> bool:
         return bool(self.api_key)
+
+
+def normalize_wire_api(value: str | None) -> str:
+    wire = (value or DEFAULT_WIRE_API).strip().lower()
+    wire = WIRE_ALIASES.get(wire, wire)
+    return wire if wire in WIRE_APIS else DEFAULT_WIRE_API
+
+
+def parse_wire_api(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return None
+    wire = WIRE_ALIASES.get(raw, raw)
+    return wire if wire in WIRE_APIS else None
 
 
 @dataclass(frozen=True)
@@ -89,7 +115,13 @@ def load_llm_config() -> LlmConfig:
     base_url = str(llm.get("base_url") or os.environ.get("FILEWATCH_LLM_BASE_URL") or DEFAULT_BASE_URL).strip()
     api_key = str(llm.get("api_key") or os.environ.get("FILEWATCH_LLM_API_KEY") or "").strip()
     model = str(llm.get("model") or os.environ.get("FILEWATCH_LLM_MODEL") or DEFAULT_MODEL).strip()
-    return LlmConfig(base_url=base_url.rstrip("/"), api_key=api_key, model=model or DEFAULT_MODEL)
+    wire_api = normalize_wire_api(str(llm.get("wire_api") or os.environ.get("FILEWATCH_LLM_WIRE_API") or DEFAULT_WIRE_API))
+    return LlmConfig(
+        base_url=base_url.rstrip("/"),
+        api_key=api_key,
+        model=model or DEFAULT_MODEL,
+        wire_api=wire_api,
+    )
 
 
 def _valid_http_url(url: str) -> bool:
@@ -107,6 +139,7 @@ def _llm_store_from_file(stored: dict[str, Any]) -> dict[str, Any]:
         "base_url": str(llm.get("base_url") or DEFAULT_BASE_URL).strip().rstrip("/") or DEFAULT_BASE_URL,
         "model": str(llm.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         "api_key": str(llm.get("api_key") or "").strip(),
+        "wire_api": normalize_wire_api(str(llm.get("wire_api") or DEFAULT_WIRE_API)),
     }
 
 
@@ -242,6 +275,28 @@ def resolve_dingtalk(ref: DingTalkRef | None) -> DingTalkTarget:
     )
 
 
+def probe_dingtalk_from_request(data: dict[str, Any]) -> dict[str, Any]:
+    from filewatch.dingtalk import probe_dingtalk_channel
+
+    webhook = str(data.get("webhook") or "").strip()
+    name = str(data.get("name") or "").strip()
+    channel_id = str(data.get("id") or data.get("channel") or "").strip()
+    incoming = data.get("secret")
+    if incoming is not None and not isinstance(incoming, str):
+        return {"ok": False, "error": "bad_request", "message": "钉钉 SEC 必须是字符串"}
+    secret = incoming.strip() if isinstance(incoming, str) and incoming.strip() else ""
+    if channel_id:
+        existing = {item.id: item for item in load_dingtalk_channels()}
+        prev = existing.get(channel_id)
+        if prev is None:
+            prev = next((item for item in existing.values() if item.name == channel_id), None)
+        if prev is not None:
+            webhook = webhook or prev.webhook
+            secret = secret or prev.secret
+            name = name or prev.name
+    return probe_dingtalk_channel(webhook=webhook, secret=secret or None, name=name)
+
+
 def _public_channels() -> list[dict[str, Any]]:
     rows = []
     for item in load_dingtalk_channels():
@@ -267,6 +322,7 @@ def public_settings() -> dict[str, Any]:
         "llm": {
             "base_url": cfg.base_url,
             "model": cfg.model,
+            "wire_api": cfg.wire_api,
             "api_key_set": cfg.configured,
             "api_key_masked": mask_secret(cfg.api_key) if cfg.configured else "",
         },
@@ -300,6 +356,18 @@ def _merge_llm(llm: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
     if not model:
         return {"ok": False, "error": "bad_request", "message": "model 不能为空"}
 
+    if "wire_api" in llm:
+        incoming_wire = llm.get("wire_api")
+        if incoming_wire is None or incoming_wire == "":
+            wire_api = DEFAULT_WIRE_API
+        else:
+            parsed = parse_wire_api(incoming_wire)
+            if parsed is None:
+                return {"ok": False, "error": "bad_request", "message": "wire_api 须为 chat、responses 或 anthropic"}
+            wire_api = parsed
+    else:
+        wire_api = current.wire_api
+
     clear = bool(llm.get("clear_api_key"))
     incoming = llm.get("api_key")
     if clear:
@@ -311,7 +379,7 @@ def _merge_llm(llm: dict[str, Any], stored: dict[str, Any]) -> dict[str, Any]:
     else:
         api_key = incoming.strip() or file_key
 
-    return {"ok": True, "llm": {"base_url": base_url, "model": model, "api_key": api_key}}
+    return {"ok": True, "llm": {"base_url": base_url, "model": model, "api_key": api_key, "wire_api": wire_api}}
 
 
 def _merge_dingtalk(raw: Any, stored: dict[str, Any]) -> dict[str, Any]:
@@ -412,7 +480,7 @@ def save_settings(data: dict[str, Any]) -> dict[str, Any]:
     has_llm_key = isinstance(data.get("llm"), dict)
     has_ding_key = "dingtalk" in data
     has_watch_key = "watch" in data
-    looks_like_llm = any(key in data for key in ("base_url", "model", "api_key", "clear_api_key"))
+    looks_like_llm = any(key in data for key in ("base_url", "model", "api_key", "clear_api_key", "wire_api"))
     if not has_llm_key and not has_ding_key and not has_watch_key and not looks_like_llm:
         return {"ok": False, "error": "bad_request", "message": "请求体必须包含 llm、dingtalk 或 watch"}
 

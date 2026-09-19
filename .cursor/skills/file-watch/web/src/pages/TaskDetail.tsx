@@ -61,7 +61,7 @@ function toToIso(local: string) {
 
 function lineSummary(lc: LineChanges | null | undefined) {
   if (!lc) return null
-  if (lc.kind === "pending") return { label: "行级结算中…", expandable: false }
+  if (lc.kind === "pending") return null
   if (lc.kind === "skipped") {
     return {
       label: SKIP_REASON[lc.reason || ""] || `已跳过（${lc.reason || "unknown"}）`,

@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from filewatch.agent_logs import read_agent_logs
 from filewatch.llm import test_llm_connection
 from filewatch.models import DEFAULT_DEBOUNCE_MS, DEFAULT_LINE_DIFF_MAX_BYTES, DEFAULT_LINE_DIFF_QUIET_MS, EVENT_TYPES
+from filewatch.paths import state_root
+from filewatch.process import claim_listen_port, pid_alive, terminate_pid
 from filewatch.service import (
     apply_edit_rule_from_text,
     apply_rules_from_text,
@@ -29,7 +34,7 @@ from filewatch.service import (
     store_for,
     watcher_config,
 )
-from filewatch.settings import public_settings, save_settings
+from filewatch.settings import probe_dingtalk_from_request, public_settings, save_settings
 
 log = logging.getLogger("filewatch.web")
 
@@ -47,7 +52,7 @@ class WatchWebHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         line = fmt % args if args else fmt
-        if " /api/" in f" {line}" and "/events" in line:
+        if " /api/" in f" {line}" and ("/events" in line or "/agent-logs" in line):
             return
         log.info("%s - %s", self.address_string(), line)
 
@@ -137,6 +142,14 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             )
             self._json(200 if payload.get("ok") else 400, payload)
             return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/agent-logs/stream", path)
+        if match:
+            self._stream_agent_logs(match.group(1), query)
+            return
+        match = re.fullmatch(r"/api/watchers/([^/]+)/agent-logs", path)
+        if match:
+            self._get_agent_logs(match.group(1), query)
+            return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
 
     def do_PATCH(self) -> None:  # noqa: N802
@@ -163,6 +176,10 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         data = body if isinstance(body, dict) else {}
         if path == "/api/settings/test":
             payload = test_llm_connection()
+            self._json(200 if payload.get("ok") else 400, payload)
+            return
+        if path == "/api/settings/dingtalk/test":
+            payload = probe_dingtalk_from_request(data)
             self._json(200 if payload.get("ok") else 400, payload)
             return
         if path == "/api/watchers/start":
@@ -260,6 +277,110 @@ class WatchWebHandler(BaseHTTPRequestHandler):
             self._handle_rename(match.group(1), data)
             return
         self._json(404, {"ok": False, "error": "not_found", "message": "未知路径"})
+
+    def _watcher_store(self, watch_id: str):
+        if not ID_RE.fullmatch(watch_id):
+            self._json(400, {"ok": False, "error": "bad_id", "message": "watch_id 无效"})
+            return None
+        store = store_for(watch_id)
+        if not store.config_path.exists() and not store.events_path.exists():
+            self._json(404, {"ok": False, "error": "not_found", "message": f"没有找到监听 {watch_id}"})
+            return None
+        return store
+
+    def _get_agent_logs(self, watch_id: str, query: dict[str, list[str]]) -> None:
+        store = self._watcher_store(watch_id)
+        if store is None:
+            return
+        session = _int_arg(query, "session")
+        offset = _int_arg(query, "from_offset", 0) or 0
+        limit = _int_arg(query, "limit", 100) or 100
+        limit = max(1, min(limit, 500))
+        tail = _bool_arg(query, "tail")
+        before = _int_arg(query, "before")
+        rule = _str_arg(query, "rule")
+        payload = read_agent_logs(
+            store.dir,
+            session=session,
+            offset=offset,
+            limit=limit,
+            tail=tail,
+            before=before,
+            rule=rule,
+            summary=_bool_arg(query, "summary"),
+        )
+        payload["watch_id"] = store.watch_id
+        self._json(200, payload)
+
+    def _stream_agent_logs(self, watch_id: str, query: dict[str, list[str]]) -> None:
+        store = self._watcher_store(watch_id)
+        if store is None:
+            return
+        session = _int_arg(query, "session")
+        rule = _str_arg(query, "rule")
+        offset = max(0, _int_arg(query, "from_offset", 0) or 0)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(b"retry: 800\n\n")
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            return
+        last_status: tuple[Any, ...] | None = None
+        last_session: int | None = None
+        follow_latest = session is None
+        while True:
+            page = read_agent_logs(
+                store.dir,
+                session=session,
+                offset=offset,
+                limit=200,
+                rule=rule,
+            )
+            current_session = int(page.get("session") or 1)
+            if follow_latest and last_session is not None and current_session != last_session:
+                offset = 0
+                page = read_agent_logs(store.dir, session=None, offset=0, limit=200, rule=rule)
+                current_session = int(page.get("session") or 1)
+            last_session = current_session
+            for event in page.get("events") or []:
+                if not self._sse({"type": "event", **event}):
+                    return
+            if page.get("events"):
+                offset = int(page.get("offset") or offset)
+            else:
+                offset = max(offset, int(page.get("file_end") or 0))
+            status = (
+                bool(page.get("running")),
+                current_session,
+                int(page.get("session_count") or 0),
+            )
+            if status != last_status:
+                last_status = status
+                if not self._sse(
+                    {
+                        "type": "status",
+                        "running": status[0],
+                        "session": status[1],
+                        "session_count": status[2],
+                    }
+                ):
+                    return
+            time.sleep(0.4)
+
+    def _sse(self, payload: dict[str, Any]) -> bool:
+        body = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            return False
+        return True
 
     def _handle_save_rules(self, watch_id: str, data: dict[str, Any]) -> None:
         if not ID_RE.fullmatch(watch_id):
@@ -442,14 +563,75 @@ def _match_watch_id(pattern: str, path: str) -> str | bool | None:
 class WatchWebServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    replaced_pids: list[int]
 
 
-def create_server(host: str, port: int) -> WatchWebServer:
-    return WatchWebServer((host, port), WatchWebHandler)
+def serve_state_path() -> Path:
+    return state_root() / "serve.json"
+
+
+def read_serve_state() -> dict[str, Any] | None:
+    path = serve_state_path()
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def write_serve_state(host: str, port: int, pid: int) -> None:
+    path = serve_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"host": host, "port": port, "pid": pid}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def clear_serve_state(pid: int | None = None) -> None:
+    path = serve_state_path()
+    if not path.exists():
+        return
+    if pid is not None:
+        state = read_serve_state()
+        if state is not None and int(state.get("pid") or 0) != pid:
+            return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def replace_serve_on_port(port: int) -> list[int]:
+    replaced: list[int] = []
+    state = read_serve_state()
+    if state is not None and int(state.get("port") or -1) == port:
+        old = int(state.get("pid") or 0)
+        if old and old != os.getpid() and pid_alive(old):
+            terminate_pid(old)
+            replaced.append(old)
+    replaced.extend(claim_listen_port(port))
+    return sorted(set(replaced))
+
+
+def create_server(host: str, port: int, *, replace_existing: bool = True) -> WatchWebServer:
+    replaced: list[int] = []
+    if replace_existing and port > 0:
+        replaced = replace_serve_on_port(port)
+    httpd = WatchWebServer((host, port), WatchWebHandler)
+    httpd.replaced_pids = replaced
+    bound_port = int(httpd.server_address[1])
+    if replace_existing and port > 0:
+        write_serve_state(host, bound_port, os.getpid())
+    return httpd
 
 
 def serve_http(host: str, port: int) -> WatchWebServer:
-    httpd = create_server(host, port)
+    httpd = create_server(host, port, replace_existing=port > 0)
     thread = threading.Thread(target=httpd.serve_forever, name="filewatch-web", daemon=True)
     thread.start()
     httpd.poll_thread = thread  # type: ignore[attr-defined]

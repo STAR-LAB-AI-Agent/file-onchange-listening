@@ -491,6 +491,7 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
         status, payload = _get(f"http://127.0.0.1:{port}/api/settings")
         assert status == 200
         assert payload["llm"]["api_key_set"] is False
+        assert payload["llm"]["wire_api"] == "chat"
         assert payload["watch"]["debounce_ms"] == 400
         assert payload["watch"]["line_diff_quiet_ms"] == 30_000
         assert payload["watch"]["line_diff_max_bytes"] == 256 * 1024
@@ -691,6 +692,149 @@ def test_web_save_watch_record_all(tmp_path: Path, monkeypatch) -> None:
         )
         assert status == 400
         assert payload["error"] == "bad_request"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_dingtalk_test_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    posted: list[tuple[str, str | None, dict]] = []
+    monkeypatch.setattr(
+        "filewatch.dingtalk.send_dingtalk",
+        lambda webhook, secret, payload: posted.append((webhook, secret, payload)),
+    )
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/settings/dingtalk/test",
+            {"webhook": "not-a-url"},
+        )
+        assert status == 400
+        assert payload["error"] == "bad_request"
+        status, payload = _put(
+            f"http://127.0.0.1:{port}/api/settings",
+            {
+                "dingtalk": {
+                    "channels": [
+                        {
+                            "id": "work",
+                            "name": "工作群",
+                            "webhook": "https://oapi.dingtalk.com/robot/send?access_token=saved",
+                            "secret": "SECsaved",
+                        }
+                    ]
+                }
+            },
+        )
+        assert status == 200, payload
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/settings/dingtalk/test",
+            {"id": "work"},
+        )
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert "工作群" in payload["message"]
+        assert posted[0][0].endswith("access_token=saved")
+        assert posted[0][1] == "SECsaved"
+        assert posted[0][2]["msgtype"] == "markdown"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_agent_logs_and_sse(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = _seed_watcher(
+        "inbox",
+        inbox,
+        {"id": "evt_1", "type": "created", "path": str(inbox / "a.md")},
+    )
+    log_dir = store.dir / "agent-logs"
+    log_dir.mkdir()
+    (log_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "job_id": "job_demo",
+                        "session": 1,
+                        "status": "ok",
+                        "rule": "md",
+                        "path": str(inbox / "a.md"),
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (log_dir / "job_demo.jsonl").write_text(
+        json.dumps(
+            {
+                "kind": "system",
+                "seq": 1,
+                "session": 1,
+                "job_id": "job_demo",
+                "ts": "12:00:00",
+                "text": "内置智能体启动",
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "kind": "agent",
+                "seq": 2,
+                "session": 1,
+                "job_id": "job_demo",
+                "ts": "12:00:01",
+                "text": "已处理 a.md",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, html = _get(f"http://127.0.0.1:{port}/tasks/inbox/agent")
+        assert status == 200
+        assert isinstance(html, str)
+        assert 'id="root"' in html
+        status, html = _get(f"http://127.0.0.1:{port}/tasks/inbox/agent/md")
+        assert status == 200
+        status, summary = _get(f"http://127.0.0.1:{port}/api/watchers/inbox/agent-logs?summary=1")
+        assert status == 200, summary
+        assert summary["stats"][0]["rule"] == "md"
+        status, payload = _get(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/agent-logs?tail=1&rule=md"
+        )
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert payload["session"] == 1
+        assert payload["session_count"] == 1
+        assert [item["kind"] for item in payload["events"]] == ["system", "agent"]
+        assert payload["job"]["rule"] == "md"
+
+        request = urllib.request.Request(f"http://127.0.0.1:{port}/api/watchers/inbox/agent-logs/stream?from_offset=0")
+        with urllib.request.urlopen(request, timeout=3) as response:
+            ctype = response.headers.get("Content-Type", "")
+            assert "text/event-stream" in ctype
+            chunks = b""
+            while chunks.count(b"data:") < 2:
+                piece = response.read(256)
+                assert piece, "SSE stream closed before first events"
+                chunks += piece
+            text = chunks.decode("utf-8")
+            assert '"kind": "system"' in text
+            assert '"kind": "agent"' in text
+            assert "job_demo" in text
     finally:
         httpd.shutdown()
         httpd.server_close()

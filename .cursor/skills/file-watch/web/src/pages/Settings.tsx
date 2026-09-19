@@ -4,13 +4,68 @@ import { ArrowLeftIcon, PlusIcon, Settings2Icon, Trash2Icon } from "lucide-react
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { api, navigate, type AppSettings, type DingTalkChannel } from "@/lib/api"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import { api, navigate, type AppSettings, type DingTalkChannel, type LlmWireApi } from "@/lib/api"
+import {
+  endpointCatalogButton,
+  endpointHelpDescription,
+  endpointHelpTitle,
+  endpointHintsFor,
+  firstExampleModel,
+  type LlmEndpointHint,
+} from "@/lib/llmEndpoints"
 
 const DEFAULT_DEBOUNCE_MS = 400
 const DEFAULT_LINE_DIFF_QUIET_MS = 30_000
 const DEFAULT_LINE_DIFF_MAX_BYTES = 256 * 1024
+const OPENAI_DEFAULT_URL = "https://api.openai.com/v1"
+const ANTHROPIC_DEFAULT_URL = "https://api.anthropic.com/v1"
+
+function parseWireApi(value: string | undefined): LlmWireApi {
+  if (value === "responses" || value === "anthropic" || value === "chat") return value
+  return "chat"
+}
+
+function wireApiLabel(wire: LlmWireApi): string {
+  if (wire === "anthropic") return "Anthropic Messages"
+  if (wire === "responses") return "OpenAI Responses"
+  return "OpenAI Chat Completions"
+}
+
+function defaultBaseUrl(wire: LlmWireApi): string {
+  return wire === "anthropic" ? ANTHROPIC_DEFAULT_URL : OPENAI_DEFAULT_URL
+}
+
+function defaultModel(wire: LlmWireApi): string {
+  if (wire === "anthropic") return "claude-sonnet-4-5"
+  if (wire === "responses") return "gpt-4.1"
+  return "gpt-4o-mini"
+}
+
+function wireApiHint(wire: LlmWireApi): string {
+  if (wire === "anthropic") {
+    return "请求会 POST 到接口地址后的 /messages：system 单独发送，工具为 tool_use / tool_result。"
+  }
+  if (wire === "responses") {
+    return "请求会 POST 到接口地址后的 /responses：system 进 instructions，工具为 function / function_call_output。"
+  }
+  return "请求会 POST 到接口地址后的 /chat/completions（兼容 OpenAI 的对话接口）。"
+}
 
 type ChannelDraft = {
   key: string
@@ -50,7 +105,8 @@ function blankChannel(): ChannelDraft {
 }
 
 export function SettingsPage() {
-  const [baseUrl, setBaseUrl] = useState("https://api.openai.com/v1")
+  const [wireApi, setWireApi] = useState<LlmWireApi>("chat")
+  const [baseUrl, setBaseUrl] = useState(OPENAI_DEFAULT_URL)
   const [model, setModel] = useState("gpt-4o-mini")
   const [apiKey, setApiKey] = useState("")
   const [masked, setMasked] = useState("")
@@ -62,6 +118,8 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [testingKey, setTestingKey] = useState<string | null>(null)
+  const [endpointHelpOpen, setEndpointHelpOpen] = useState(false)
   const [dingReady, setDingReady] = useState(false)
   const channelsRef = useRef(channels)
   channelsRef.current = channels
@@ -78,11 +136,33 @@ export function SettingsPage() {
   }
 
   function applyLlm(data: AppSettings) {
-    setBaseUrl(data.llm.base_url || "https://api.openai.com/v1")
-    setModel(data.llm.model || "gpt-4o-mini")
+    const wire = parseWireApi(data.llm.wire_api)
+    setWireApi(wire)
+    setBaseUrl(data.llm.base_url || defaultBaseUrl(wire))
+    setModel(data.llm.model || defaultModel(wire))
     setKeySet(!!data.llm.api_key_set)
     setMasked(data.llm.api_key_masked || "")
     setApiKey("")
+  }
+
+  function changeWireApi(next: LlmWireApi) {
+    const prevUrl = defaultBaseUrl(wireApi)
+    const nextUrl = defaultBaseUrl(next)
+    if (!baseUrl.trim() || baseUrl.trim().replace(/\/+$/, "") === prevUrl) {
+      setBaseUrl(nextUrl)
+    }
+    const prevModel = defaultModel(wireApi)
+    if (!model.trim() || model.trim() === prevModel) {
+      setModel(defaultModel(next))
+    }
+    setWireApi(next)
+  }
+
+  function fillEndpoint(item: LlmEndpointHint) {
+    setBaseUrl(item.endpoint)
+    const example = firstExampleModel(item.models)
+    if (example) setModel(example)
+    setEndpointHelpOpen(false)
   }
 
   function applyDingtalk(data: AppSettings, force = false) {
@@ -123,6 +203,7 @@ export function SettingsPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           llm: {
+            wire_api: wireApi,
             base_url: baseUrl.trim(),
             model: model.trim(),
             api_key: apiKey,
@@ -195,6 +276,35 @@ export function SettingsPage() {
       setError(err instanceof Error ? err.message : "保存失败")
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function testDingtalk(channel: ChannelDraft) {
+    const webhook = channel.webhook.trim()
+    if (!webhook) {
+      setError("请先填写钉钉 Webhook")
+      setMessage(null)
+      return
+    }
+    setTestingKey(channel.key)
+    setError(null)
+    setMessage(null)
+    try {
+      const ping = await api<{ message?: string }>("/api/settings/dingtalk/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: channel.id || undefined,
+          name: channel.name.trim() || "钉钉群",
+          webhook,
+          secret: channel.secret,
+        }),
+      })
+      setMessage(ping.message || "已发送测试消息")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "测试发送失败")
+    } finally {
+      setTestingKey(null)
     }
   }
 
@@ -280,22 +390,53 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle>LLM</CardTitle>
-          <CardDescription>填写 API Key 后，即可在任务的「监听规则」页用口语生成规则。</CardDescription>
+          <CardDescription>填写 API Key 后，即可在任务的「监听规则」页用口语生成规则。按服务商选择协议。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           <div className="grid gap-1.5">
-            <Label htmlFor="base-url">接口地址（OpenAI 兼容）</Label>
+            <Label htmlFor="wire-api">接口协议</Label>
+            <Select
+              value={wireApi}
+              onValueChange={(value) => {
+                if (value === "chat" || value === "responses" || value === "anthropic") {
+                  changeWireApi(value)
+                }
+              }}
+            >
+              <SelectTrigger id="wire-api">
+                <SelectValue>{wireApiLabel(wireApi)}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="chat">OpenAI Chat Completions</SelectItem>
+                <SelectItem value="responses">OpenAI Responses</SelectItem>
+                <SelectItem value="anthropic">Anthropic Messages</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-relaxed text-muted-foreground">{wireApiHint(wireApi)}</p>
+          </div>
+          <div className="grid gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="base-url">接口地址</Label>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setEndpointHelpOpen(true)}>
+                {endpointCatalogButton(wireApi)}
+              </Button>
+            </div>
             <Input
               id="base-url"
               value={baseUrl}
               onChange={(event) => setBaseUrl(event.target.value)}
-              placeholder="https://api.openai.com/v1"
+              placeholder={defaultBaseUrl(wireApi)}
               className="font-mono"
             />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="model">模型</Label>
-            <Input id="model" value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" />
+            <Input
+              id="model"
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              placeholder={defaultModel(wireApi)}
+            />
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="api-key">API Key</Label>
@@ -377,7 +518,9 @@ export function SettingsPage() {
       <Card>
         <CardHeader>
           <CardTitle>钉钉推送</CardTitle>
-          <CardDescription>在这里填写群机器人 Webhook 和 SEC。添加规则时只需从下拉栏选择要推送到哪个群。</CardDescription>
+          <CardDescription>
+            在这里填写群机器人 Webhook 和 SEC。添加规则时只需从下拉栏选择要推送到哪个群。可用「发送测试」立刻往该群推一条消息，不必等文件变化。
+          </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
           {channels.length === 0 ? (
@@ -387,18 +530,30 @@ export function SettingsPage() {
               <div key={channel.key} className="grid gap-3 rounded-lg border p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-sm font-medium">机器人 {index + 1}</div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      dingDirty.current = true
-                      setChannels((current) => current.filter((item) => item.key !== channel.key))
-                    }}
-                  >
-                    <Trash2Icon data-icon="inline-start" />
-                    删除
-                  </Button>
+                  <div className="flex flex-wrap items-center justify-end gap-1">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={!dingReady || saving || testingKey !== null || !channel.webhook.trim()}
+                      onClick={() => void testDingtalk(channel)}
+                    >
+                      {testingKey === channel.key ? "发送中…" : "发送测试"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={saving || testingKey !== null}
+                      onClick={() => {
+                        dingDirty.current = true
+                        setChannels((current) => current.filter((item) => item.key !== channel.key))
+                      }}
+                    >
+                      <Trash2Icon data-icon="inline-start" />
+                      删除
+                    </Button>
+                  </div>
                 </div>
                 <div className="grid gap-1.5">
                   <Label htmlFor={`ding-name-${channel.key}`}>名称</Label>
@@ -463,6 +618,32 @@ export function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={endpointHelpOpen} onOpenChange={setEndpointHelpOpen}>
+        <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>{endpointHelpTitle(wireApi)}</DialogTitle>
+            <DialogDescription>{endpointHelpDescription(wireApi)}</DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 space-y-2 overflow-y-auto pr-1">
+            {endpointHintsFor(wireApi).map((item) => (
+              <div key={item.name} className="grid gap-2 rounded-lg border p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 space-y-1">
+                    <div className="text-sm font-medium">{item.name}</div>
+                    <div className="break-all font-mono text-xs text-muted-foreground">{item.endpoint}</div>
+                  </div>
+                  <Button type="button" variant="outline" size="sm" onClick={() => fillEndpoint(item)}>
+                    填入
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">模型示例：{item.models}</p>
+                <p className="text-xs text-muted-foreground">{item.note}</p>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

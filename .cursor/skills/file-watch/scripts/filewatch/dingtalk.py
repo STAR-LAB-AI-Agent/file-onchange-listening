@@ -86,6 +86,23 @@ def markdown_payload(title: str, text: str) -> dict[str, Any]:
     return {"msgtype": "markdown", "markdown": {"title": title, "text": text}}
 
 
+def probe_dingtalk_channel(*, webhook: str, secret: str | None, name: str = "") -> dict[str, Any]:
+    webhook = (webhook or "").strip()
+    if not webhook:
+        return {"ok": False, "error": "bad_request", "message": "钉钉 Webhook 不能为空"}
+    parsed = urlparse(webhook)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return {"ok": False, "error": "bad_request", "message": "钉钉 Webhook 必须是 http(s) 地址"}
+    label = (name or "").strip() or "钉钉群"
+    title = "filewatch 测试"
+    text = f"### {title}\n\n这是一条来自设置页的测试消息。\n\n渠道：**{label}**"
+    try:
+        send_dingtalk(webhook, secret or None, markdown_payload(title, text))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": "dingtalk_failed", "message": f"钉钉测试发送失败：{exc}"}
+    return {"ok": True, "message": f"已向「{label}」发送测试消息"}
+
+
 def send_dingtalk(webhook: str, secret: str | None, payload: dict[str, Any]) -> None:
     url = signed_webhook(webhook, secret)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

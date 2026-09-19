@@ -9,7 +9,7 @@ description: >-
 
 # 文件监听
 
-版本 **2.1.1**。
+版本 **2.1.2**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 
@@ -168,7 +168,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 ```json
 {
-  "llm": {"base_url": "...", "model": "...", "api_key": "..."},
+  "llm": {"base_url": "...", "model": "...", "api_key": "...", "wire_api": "chat"},
   "dingtalk": {
     "channels": [
       {
@@ -194,16 +194,17 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 ## 网页
 
-在本机打开任务面板。首页按监听目录列出任务，名称默认为文件夹名、可改；详情分「文件变化」和「监听规则」：
+在本机打开任务面板。首页按监听目录列出任务，名称默认为文件夹名、可改；详情分「文件变化」、「监听规则」和「智能体」：
 
-- 文件变化：该目录的新建 / 修改 / 删除 / 移动；可按文件名或路径搜索，并与类型、时间筛选一起用。内容未变的 `modified`（仅时间戳/属性、编辑器空保存等）不入列表。可读文本在安静 `line_diff_quiet_ms`（默认 30 秒，可在设置页改）后显示行级 `+N / −M`，可展开查看增减行。添加目录时可关掉「默认监听全部文件变化」，之后也可在任务页切换；关掉后只记录命中正向规则的文件
+- 文件变化：该目录的新建 / 修改 / 删除 / 移动；可按文件名或路径搜索，并与类型、时间筛选一起用。内容未变的 `modified`（仅时间戳/属性、编辑器空保存等）不入列表。可读文本在安静 `line_diff_quiet_ms`（默认 30 秒，可在设置页改）后显示行级 `+N / −M`，可展开查看增减行；列表不保留「行级结算中…」，同路径未结算的中间修改会被后一条替换。添加目录时可关掉「默认监听全部文件变化」，之后也可在任务页切换；关掉后只记录命中正向规则的文件
 - 监听规则：手动添加（任务要求非空即 builtin 智能体；也可添加反向规则排除某类文件；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言添加新规则（只追加，不改已有规则；调用 LLM；也可粘贴 YAML/JSON，不经模型）。打开规则编辑后，可在表单顶部用自然语言由 AI 填入该条，确认后再保存。已运行则热更新，未运行则写入配置等下次 start
-- 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key，钉钉群机器人（名称、Webhook、SEC），以及事件入账去抖、行级快照等待和最大文件。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`。规则里不要再写钉钉 webhook
+- 智能体：只列出填写了任务要求的规则；点进某条后，该规则的执行过程以 SSE 实时日志按轮次展示（system / user / agent / 工具命令，可展开）。工具日志仍写入 `home/agent-logs/<job_id>.jsonl`
+- 设置：`/settings` 填写 `base_url` / `model` / API Key，并选择协议 `wire_api`（`chat` 走 `/chat/completions`，`responses` 走 `/responses`，`anthropic` 走 `/messages`）。接口地址旁可打开常见端点列表（国产 Chat Completions、Anthropic Messages、Responses）一键填入。钉钉群机器人（名称、Webhook、SEC），以及事件入账去抖、行级快照等待和最大文件。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`、`FILEWATCH_LLM_WIRE_API`。规则里不要再写钉钉 webhook
 
 用户要打开面板时：
 
-1. 若 `http://127.0.0.1:8765/`（或指定端口）已可访问，直接把地址给用户，不要再起一个 `serve`。
-2. 否则**后台**启动，读完第一行 JSON 就继续当前对话，不要把会话阻塞到 Ctrl+C：
+1. 若只要打开已有面板、且 `http://127.0.0.1:8765/`（或指定端口）已可访问，直接把地址给用户。
+2. 需要重新拉起时**后台**启动：同端口上的旧 `serve` 会被结束，只保留本次进程。读完第一行 JSON 就继续当前对话，不要把会话阻塞到 Ctrl+C：
 
 ```bash
 python scripts/filewatch_cli.py serve --port 8765 --open
@@ -211,7 +212,7 @@ python scripts/filewatch_cli.py serve --port 8765 --open
 
 浏览器访问 JSON 里的 `url`（默认 `http://127.0.0.1:8765/`）。可同时添加多个目录；同一路径会复用已有任务。默认只绑定本机回环地址。加 `--open` 可自动打开浏览器。关掉浏览器不会停止已经在听的目录；不要为了关网页去 `stop` 守护进程。只要面板、目录稍后再定时，可以先不起具体目录。改前端源码在 `web/`，构建：`npm run build`（产物在 `scripts/filewatch/webui/`）。
 
-`serve` 的 stdout 只打一行 JSON，随后进程保持运行直到被结束。日志走 stderr。
+`serve` 的 stdout 只打一行 JSON，随后进程保持运行直到被结束。日志走 stderr。再次 `serve` 同一端口会结束旧进程，JSON 里的 `replaced_pids` 是被替换的 PID。
 
 ## 规则
 
@@ -278,7 +279,7 @@ when:
 `then` 动作：
 
 - `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON（不是钉钉）。钉钉用 `dingtalk: true` 或 `{channel: id}`，凭证在设置 `dingtalk.channels`，命中后按分钟汇总（无变化不发送）。规则内 webhook/secret 仅兼容旧配置。
-- `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工具日志在 `home/agent-logs/<job_id>.jsonl`。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。
+- `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工作流写入 `home/agent-logs/<job_id>.jsonl`，网页「智能体」页用 SSE 实时展示。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。
 - `agent.runner: command`：执行 argv。prompt 走 stdin，同时设置 `FILEWATCH_PROMPT` 和 `FILEWATCH_EVENT_JSON`。
 - `agent.runner: cursor_sdk`：需要 `cursor-sdk` 和 `CURSOR_API_KEY`。会启动**一次新的**智能体 run，不会唤醒当前对话。
 
@@ -306,7 +307,7 @@ stop
 
 没有配置规则时，改为 `wait --stream events`。
 
-`events` 流里，可读文本文件会附带 `line_changes`（行级增删）。事件仍按 `watch.debounce_ms`（默认 400ms）入账；若 `modified` 的内容与上次指纹或行级快照相同，则不写入 events、也不触发规则（操作系统仍可能因时间戳/属性发出 modified）。行级快照另等 `watch.line_diff_quiet_ms`（默认 30000ms / 30 秒）该文件无新事件后再结算，结果按 `event_id` 合并进读取。超过 `watch.line_diff_max_bytes`（默认 256KB）视为过大，`kind: skipped`。规则匹配仍按文件级，不读行内容。二进制 / 尚无基线时同样为 `skipped`。结算前可能是 `kind: pending`。入账去抖、快照等待和最大文件也可在设置页修改，保存后应用到已有任务。
+`events` 流里，可读文本文件会附带 `line_changes`（行级增删）。事件仍按 `watch.debounce_ms`（默认 400ms）入账；若 `modified` 的内容与上次指纹或行级快照相同，则不写入 events、也不触发规则（操作系统仍可能因时间戳/属性发出 modified）。行级快照另等 `watch.line_diff_quiet_ms`（默认 30000ms / 30 秒）该文件无新事件后再结算，结果按 `event_id` 合并进读取。超过 `watch.line_diff_max_bytes`（默认 256KB）视为过大，`kind: skipped`。规则匹配仍按文件级，不读行内容。二进制 / 尚无基线时同样为 `skipped`。结算前可能是 `kind: pending`，网页列表不展示该状态，被后续同路径事件覆盖的未结算 `modified` 也不出现在列表中。入账去抖、快照等待和最大文件也可在设置页修改，保存后应用到已有任务。
 
 先 `status` / `list`，已有同类 watcher 就复用，不要对同一路径再开一个守护进程。改规则先读 `home/config.json` 再 `reload`；未运行则 `start --config` 该配置。不要对已有路径 `start --path`。
 

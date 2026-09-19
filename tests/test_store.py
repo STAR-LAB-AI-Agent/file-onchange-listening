@@ -122,6 +122,52 @@ def test_ack_cannot_move_backwards(tmp_path) -> None:
         assert "backwards" in str(exc)
 
 
+def test_query_records_replaces_superseded_pending_modified(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.append(
+        "events",
+        {
+            "id": "old",
+            "type": "modified",
+            "path": r"D:\data\inbox\a.txt",
+            "ts": "2026-09-17T10:00:00Z",
+            "line_changes": {"kind": "pending"},
+        },
+    )
+    store.append(
+        "events",
+        {
+            "id": "latest",
+            "type": "modified",
+            "path": r"D:\data\inbox\a.txt",
+            "ts": "2026-09-17T10:00:01Z",
+            "line_changes": {"kind": "pending"},
+        },
+    )
+    store.append(
+        "events",
+        {
+            "id": "other",
+            "type": "modified",
+            "path": r"D:\data\inbox\b.txt",
+            "ts": "2026-09-17T10:00:02Z",
+            "line_changes": {"kind": "pending"},
+        },
+    )
+    pending = store.query_records("events", page=1, page_size=100)
+    assert [item["id"] for item in pending["items"]] == ["other", "latest"]
+
+    put_line_changes(
+        store.line_changes_path,
+        "latest",
+        {"kind": "text", "added": 2, "removed": 1, "truncated": False, "changes": []},
+    )
+    settled = store.query_records("events", page=1, page_size=100)
+    assert [item["id"] for item in settled["items"]] == ["other", "latest"]
+    assert settled["items"][1]["line_changes"]["added"] == 2
+
+
 def test_query_records_hides_noop_modified(tmp_path) -> None:
     store = WatchStore("demo", root=tmp_path)
     store.ensure()

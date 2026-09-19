@@ -12,6 +12,7 @@ from filewatch.settings import (
     resolve_dingtalk,
     save_settings,
     settings_path,
+    probe_dingtalk_from_request,
 )
 
 
@@ -33,6 +34,8 @@ def test_save_and_public_settings_hide_key(tmp_path: Path, monkeypatch) -> None:
     cfg = load_llm_config()
     assert cfg.api_key == "sk-secret-key-1234"
     assert cfg.model == "demo-model"
+    assert cfg.wire_api == "chat"
+    assert result["llm"]["wire_api"] == "chat"
     public = public_settings()
     assert "sk-secret-key-1234" not in str(public)
     assert settings_path().is_file()
@@ -177,6 +180,44 @@ def test_resolve_dingtalk_missing_channel(tmp_path: Path, monkeypatch) -> None:
         assert "找不到钉钉渠道" in str(exc)
 
 
+def test_probe_dingtalk_from_request_uses_saved_secret(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    save_settings(
+        {
+            "dingtalk": {
+                "channels": [
+                    {
+                        "id": "work",
+                        "name": "工作群",
+                        "webhook": "https://oapi.dingtalk.com/robot/send?access_token=saved",
+                        "secret": "SECsaved",
+                    }
+                ]
+            }
+        }
+    )
+    posted: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "filewatch.dingtalk.send_dingtalk",
+        lambda webhook, secret, payload: posted.append((webhook, secret)),
+    )
+    result = probe_dingtalk_from_request({"id": "work", "webhook": "", "secret": "", "name": ""})
+    assert result["ok"] is True
+    assert posted == [("https://oapi.dingtalk.com/robot/send?access_token=saved", "SECsaved")]
+    posted.clear()
+    result = probe_dingtalk_from_request(
+        {
+            "id": "work",
+            "webhook": "https://oapi.dingtalk.com/robot/send?access_token=draft",
+            "secret": "SECdraft",
+            "name": "草稿群",
+        }
+    )
+    assert result["ok"] is True
+    assert posted == [("https://oapi.dingtalk.com/robot/send?access_token=draft", "SECdraft")]
+    assert "草稿群" in result["message"]
+
+
 def test_watch_timing_defaults_and_save(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
     monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
@@ -210,3 +251,37 @@ def test_watch_timing_rejects_negative(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is False
     result = save_settings({"watch": {"line_diff_max_bytes": 0}})
     assert result["ok"] is False
+
+
+def test_save_and_keep_wire_api(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("FILEWATCH_LLM_WIRE_API", raising=False)
+    result = save_settings(
+        {
+            "llm": {
+                "base_url": "https://api.anthropic.com/v1",
+                "model": "claude-sonnet-4-5",
+                "api_key": "sk-ant",
+                "wire_api": "messages",
+            }
+        }
+    )
+    assert result["ok"] is True
+    assert result["llm"]["wire_api"] == "anthropic"
+    assert load_llm_config().wire_api == "anthropic"
+    save_settings({"llm": {"model": "claude-opus-4-6"}})
+    assert load_llm_config().wire_api == "anthropic"
+    assert load_llm_config().model == "claude-opus-4-6"
+    rejected = save_settings({"llm": {"wire_api": "soap"}})
+    assert rejected["ok"] is False
+    assert rejected["error"] == "bad_request"
+    save_settings({"llm": {"wire_api": "openai-responses"}})
+    assert load_llm_config().wire_api == "responses"
+
+
+def test_wire_api_from_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("FILEWATCH_LLM_WIRE_API", "anthropic")
+    assert load_llm_config().wire_api == "anthropic"

@@ -75,6 +75,11 @@ def snapshot_fingerprint(snapshots_dir: Path, path: str | Path) -> str | None:
     return "t:" + hashlib.sha256(baseline.encode("utf-8")).hexdigest()
 
 
+def is_pending_line_changes(record: dict[str, Any]) -> bool:
+    payload = record.get("line_changes")
+    return isinstance(payload, dict) and payload.get("kind") == "pending"
+
+
 def is_noop_text_modified(record: dict[str, Any]) -> bool:
     """True when a modified event settled to zero line changes."""
     if record.get("type") != "modified":
@@ -83,6 +88,27 @@ def is_noop_text_modified(record: dict[str, Any]) -> bool:
     if not isinstance(payload, dict) or payload.get("kind") != "text":
         return False
     return int(payload.get("added") or 0) == 0 and int(payload.get("removed") or 0) == 0
+
+
+def drop_superseded_pending_modified(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop pending modified events that a later same-path event replaced."""
+    latest_by_path: dict[str, int] = {}
+    for index, record in enumerate(records):
+        path = record.get("path")
+        if isinstance(path, str) and path:
+            latest_by_path[path] = index
+    kept: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        path = record.get("path")
+        if (
+            record.get("type") == "modified"
+            and is_pending_line_changes(record)
+            and isinstance(path, str)
+            and latest_by_path.get(path) != index
+        ):
+            continue
+        kept.append(record)
+    return kept
 
 
 def read_text_file(path: Path, *, max_bytes: int = MAX_FILE_BYTES) -> tuple[dict[str, Any] | None, str | None, str | None]:

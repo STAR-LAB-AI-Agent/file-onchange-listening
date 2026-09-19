@@ -7,6 +7,7 @@ from filewatch.linediff import (
     MAX_FILE_BYTES,
     MAX_LINE_CHARS,
     build_line_changes,
+    drop_superseded_pending_modified,
     content_fingerprint,
     is_noop_text_modified,
     load_line_changes_map,
@@ -140,6 +141,17 @@ def test_content_fingerprint_and_noop_modified(tmp_path: Path) -> None:
     assert not is_noop_text_modified(
         {"type": "modified", "line_changes": {"kind": "text", "added": 1, "removed": 0}}
     )
+
+
+def test_drop_superseded_pending_modified() -> None:
+    records = [
+        {"id": "created", "type": "created", "path": "a.txt", "line_changes": {"kind": "pending"}},
+        {"id": "a1", "type": "modified", "path": "a.txt", "line_changes": {"kind": "pending"}},
+        {"id": "a2", "type": "modified", "path": "a.txt", "line_changes": {"kind": "pending"}},
+        {"id": "b1", "type": "modified", "path": "b.txt", "line_changes": {"kind": "text", "added": 1}},
+    ]
+    kept = drop_superseded_pending_modified(records)
+    assert [item["id"] for item in kept] == ["created", "a2", "b1"]
 
 
 def test_sidecar_merge(tmp_path: Path) -> None:

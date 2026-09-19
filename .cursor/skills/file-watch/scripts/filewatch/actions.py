@@ -129,7 +129,7 @@ class ActionRunner:
                 output = self._run_cursor_sdk(prompt, cwd, action)
                 return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
             if action.runner == "builtin":
-                return self._run_builtin(action, event, prompt, cwd, job_id)
+                return self._run_builtin(action, event, prompt, cwd, job_id, rule.name)
             output = self._run_command(action, event, extra, prompt, cwd)
             return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
         except Exception as exc:  # noqa: BLE001
@@ -158,6 +158,7 @@ class ActionRunner:
         prompt: str,
         cwd: str | None,
         job_id: str,
+        rule_name: str,
     ) -> dict[str, Any]:
         from filewatch.agent.loop import run_builtin_agent
 
@@ -173,6 +174,12 @@ class ActionRunner:
             max_steps=action.max_steps,
             model=action.model,
             suppress=self.suppress,
+            meta={
+                "rule": rule_name,
+                "path": event.path,
+                "type": event.type,
+                "watch_id": event.watch_id,
+            },
         )
         record: dict[str, Any] = {
             "status": result.status,

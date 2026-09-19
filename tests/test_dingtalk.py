@@ -14,6 +14,7 @@ from filewatch.dingtalk import (
     format_markdown,
     send_dingtalk,
     signed_webhook,
+    probe_dingtalk_channel,
 )
 from filewatch.models import DingTalkTarget, FileEvent
 from filewatch.store import WatchStore
@@ -255,6 +256,31 @@ def test_send_dingtalk_checks_errcode(monkeypatch) -> None:
         )
     assert "timestamp=" in captured["url"]
     assert "sign=" in captured["url"]
+
+
+def test_probe_dingtalk_channel_sends_markdown(monkeypatch) -> None:
+    posted: list[tuple[str, str | None, dict]] = []
+    monkeypatch.setattr(
+        "filewatch.dingtalk.send_dingtalk",
+        lambda webhook, secret, payload: posted.append((webhook, secret, payload)),
+    )
+    result = probe_dingtalk_channel(
+        webhook="https://oapi.dingtalk.com/robot/send?access_token=tok",
+        secret="SECdemo",
+        name="工作群",
+    )
+    assert result["ok"] is True
+    assert "工作群" in result["message"]
+    assert posted[0][0].startswith("https://oapi.dingtalk.com/")
+    assert posted[0][1] == "SECdemo"
+    assert posted[0][2]["msgtype"] == "markdown"
+    assert "测试" in posted[0][2]["markdown"]["text"]
+
+
+def test_probe_dingtalk_channel_rejects_empty_webhook() -> None:
+    result = probe_dingtalk_channel(webhook="  ", secret=None, name="x")
+    assert result["ok"] is False
+    assert result["error"] == "bad_request"
 
 
 def test_notify_queues_dingtalk_until_flush(tmp_path: Path, monkeypatch) -> None:

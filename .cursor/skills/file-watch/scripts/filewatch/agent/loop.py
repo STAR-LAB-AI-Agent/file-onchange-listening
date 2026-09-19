@@ -92,12 +92,14 @@ def run_builtin_agent(
     suppress: Callable[[str, float], None] | None = None,
     registry: ToolRegistry | None = None,
     chat: Callable[..., dict[str, Any]] | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> AgentRunResult:
     workspace = workspace.resolve()
     registry = registry or build_default_registry()
     chat_fn = chat or chat_messages
     log_path = log_dir / f"{job_id}.jsonl"
-    logger = ToolCallLogger(log_path)
+    logger = ToolCallLogger(log_path, job_id=job_id, meta=meta)
+    result: AgentRunResult | None = None
     ctx = ToolContext(
         workspace=workspace,
         job_id=job_id,
@@ -125,67 +127,92 @@ def run_builtin_agent(
     steps = 0
     tool_call_count = 0
     final_text = ""
+    trigger = f"{event.type} {to_posix(event.path)}"
+    logger.emit("system", text="内置智能体启动", session_start=True)
+    logger.emit("system", text=f"任务要求：{prompt}", source="user")
+    logger.emit("system", text=f"工作区 {to_posix(workspace)} · 触发 {trigger}")
 
-    while steps < max_steps:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return AgentRunResult(
-                status="error",
-                output=final_text[-4000:],
-                error="timeout",
-                message="智能体任务超时",
-                steps=steps,
-                tool_calls=tool_call_count,
-                log_path=str(log_path),
-            )
-        try:
-            message = chat_fn(
-                messages,
-                tools=tools,
-                model=model,
-                timeout=min(120.0, max(5.0, remaining)),
-            )
-        except LlmError as exc:
-            return AgentRunResult(
-                status="error",
-                output=final_text[-4000:],
-                error=exc.error,
-                message=exc.message,
-                steps=steps,
-                tool_calls=tool_call_count,
-                log_path=str(log_path),
-            )
-        steps += 1
-        content = message.get("content")
-        if isinstance(content, str) and content.strip():
-            final_text = content.strip()
-        calls = _parse_tool_calls(message)
-        messages.append(_assistant_message_for_history(message))
-        if not calls:
-            return AgentRunResult(
-                status="ok",
-                output=(final_text or "（无输出）")[-4000:],
-                steps=steps,
-                tool_calls=tool_call_count,
-                log_path=str(log_path),
-            )
-        records = registry.dispatch(calls, ctx, logger=logger)
-        tool_call_count += len(records)
-        for record in records:
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": record.id,
-                    "content": record.result.to_content(),
-                }
-            )
+    try:
+        while steps < max_steps:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result = AgentRunResult(
+                    status="error",
+                    output=final_text[-4000:],
+                    error="timeout",
+                    message="智能体任务超时",
+                    steps=steps,
+                    tool_calls=tool_call_count,
+                    log_path=str(log_path),
+                )
+                return result
+            try:
+                message = chat_fn(
+                    messages,
+                    tools=tools,
+                    model=model,
+                    timeout=min(120.0, max(5.0, remaining)),
+                )
+            except LlmError as exc:
+                result = AgentRunResult(
+                    status="error",
+                    output=final_text[-4000:],
+                    error=exc.error,
+                    message=exc.message,
+                    steps=steps,
+                    tool_calls=tool_call_count,
+                    log_path=str(log_path),
+                )
+                return result
+            steps += 1
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                final_text = content.strip()
+                logger.emit("agent", text=final_text)
+            calls = _parse_tool_calls(message)
+            messages.append(_assistant_message_for_history(message))
+            if not calls:
+                result = AgentRunResult(
+                    status="ok",
+                    output=(final_text or "（无输出）")[-4000:],
+                    steps=steps,
+                    tool_calls=tool_call_count,
+                    log_path=str(log_path),
+                )
+                return result
+            records = registry.dispatch(calls, ctx, logger=logger)
+            tool_call_count += len(records)
+            for record in records:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": record.id,
+                        "content": record.result.to_content(),
+                    }
+                )
 
-    return AgentRunResult(
-        status="error",
-        output=(final_text or f"超过 max_steps={max_steps}")[-4000:],
-        error="max_steps",
-        message=f"超过最大步数 {max_steps}",
-        steps=steps,
-        tool_calls=tool_call_count,
-        log_path=str(log_path),
-    )
+        result = AgentRunResult(
+            status="error",
+            output=(final_text or f"超过 max_steps={max_steps}")[-4000:],
+            error="max_steps",
+            message=f"超过最大步数 {max_steps}",
+            steps=steps,
+            tool_calls=tool_call_count,
+            log_path=str(log_path),
+        )
+        return result
+    finally:
+        if result is None:
+            result = AgentRunResult(
+                status="error",
+                output=final_text[-4000:] if final_text else "",
+                error="aborted",
+                message="智能体已中断",
+                steps=steps,
+                tool_calls=tool_call_count,
+                log_path=str(log_path),
+            )
+        if result.status == "ok":
+            logger.close("ok", f"已完成，共 {result.steps} 步 · 工具 {result.tool_calls} 次")
+        else:
+            logger.close(result.error or result.status, result.message or result.error or "失败")
