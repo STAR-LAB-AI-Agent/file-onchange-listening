@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from filewatch.models import (
+    DEFAULT_AGENT_MAX_STEPS,
+    DEFAULT_AGENT_TIMEOUT_SECONDS,
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_DINGTALK_CHANNEL,
     DEFAULT_IGNORE,
@@ -362,8 +364,14 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             raise ConfigError("runner 为 builtin 时必须提供非空 agent.prompt（任务要求）")
         if not prompt:
             prompt = "File {{type}}: {{path}}"
-        timeout = payload.get("timeout_seconds", 600)
-        max_steps = payload.get("max_steps", 24)
+        timeout = payload.get("timeout_seconds", DEFAULT_AGENT_TIMEOUT_SECONDS)
+        max_steps = payload.get("max_steps", DEFAULT_AGENT_MAX_STEPS)
+        try:
+            timeout_f = float(timeout)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("agent.timeout_seconds 必须是数字") from exc
+        if timeout_f < 1:
+            raise ConfigError("agent.timeout_seconds 必须 >= 1")
         try:
             max_steps_i = int(max_steps)
         except (TypeError, ValueError) as exc:
@@ -375,7 +383,7 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             prompt=prompt,
             command=argv,
             cwd=payload.get("cwd"),
-            timeout_seconds=float(timeout),
+            timeout_seconds=timeout_f,
             model=payload.get("model"),
             max_steps=max_steps_i,
             dingtalk=_parse_dingtalk(payload.get("dingtalk"), field="agent.dingtalk"),

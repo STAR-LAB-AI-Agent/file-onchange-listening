@@ -45,6 +45,7 @@ def test_builtin_config_defaults() -> None:
     action = cfg.rules[0].then[0]
     assert action.runner == "builtin"  # type: ignore[union-attr]
     assert action.max_steps == 24  # type: ignore[union-attr]
+    assert action.timeout_seconds == 1800  # type: ignore[union-attr]
 
 
 def test_builtin_requires_prompt() -> None:
@@ -65,6 +66,26 @@ def test_builtin_requires_prompt() -> None:
         assert False, "expected ConfigError"
     except ConfigError as exc:
         assert "prompt" in str(exc)
+
+
+def test_builtin_rejects_timeout_below_one() -> None:
+    try:
+        parse_config_dict(
+            {
+                "name": "t",
+                "watch": {"path": "/tmp/w"},
+                "rules": [
+                    {
+                        "name": "r1",
+                        "when": {"types": ["created"]},
+                        "then": [{"agent": {"prompt": "do it", "timeout_seconds": 0}}],
+                    }
+                ],
+            }
+        )
+        assert False, "expected ConfigError"
+    except ConfigError as exc:
+        assert "timeout_seconds" in str(exc)
 
 
 def test_command_still_requires_argv() -> None:

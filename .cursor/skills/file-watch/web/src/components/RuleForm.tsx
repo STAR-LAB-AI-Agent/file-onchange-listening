@@ -31,6 +31,7 @@ import {
 
 const TYPE_IDS = ["created", "modified", "deleted", "moved"] as const
 const DING_NONE = "__none__"
+const DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 
 const EVENT_TYPE_ON_CLASS: Record<(typeof TYPE_IDS)[number], string> = {
   created:
@@ -113,6 +114,11 @@ export function RuleForm({
     if (agent0.runner === "command" || agent0.runner === "cursor_sdk") return ""
     return agent0.prompt || ""
   })
+  const [timeoutSeconds, setTimeoutSeconds] = useState(() => {
+    const value = agent0?.timeout_seconds
+    if (typeof value === "number" && Number.isFinite(value) && value >= 1) return String(value)
+    return String(DEFAULT_AGENT_TIMEOUT_SECONDS)
+  })
 
   const canSubmit = useMemo(() => {
     if (!types.length) return false
@@ -192,12 +198,16 @@ export function RuleForm({
     ]
     const task = taskPrompt.trim()
     if (task) {
+      const parsedTimeout = Number.parseInt(timeoutSeconds, 10)
       then.push({
         agent: {
           runner: "builtin",
           prompt: task,
           command: null,
-          timeout_seconds: 600,
+          timeout_seconds:
+            Number.isFinite(parsedTimeout) && parsedTimeout >= 1
+              ? parsedTimeout
+              : DEFAULT_AGENT_TIMEOUT_SECONDS,
           max_steps: 24,
           dingtalk: dingTalkValue,
         },
@@ -509,6 +519,20 @@ export function RuleForm({
           {"{{type}} {{path}}"}
         </FieldHint>
       </div>
+      {taskPrompt.trim() ? (
+        <div className="grid gap-1.5">
+          <Label htmlFor="rule-timeout">任务超时（秒）</Label>
+          <Input
+            id="rule-timeout"
+            type="number"
+            min={1}
+            step={1}
+            value={timeoutSeconds}
+            onChange={(event) => setTimeoutSeconds(event.target.value)}
+          />
+          <FieldHint>内置智能体整次任务的上限，默认 1800 秒（30 分钟）。超时后停止，不继续调工具。</FieldHint>
+        </div>
+      ) : null}
         </>
       )}
 

@@ -118,6 +118,10 @@ class DingTalkRef:
         return DingTalkTarget(webhook=webhook, secret=secret, interval_seconds=self.interval_seconds)
 
 
+DEFAULT_AGENT_TIMEOUT_SECONDS = 1800.0
+DEFAULT_AGENT_MAX_STEPS = 24
+
+
 @dataclass(frozen=True)
 class NotifyAction:
     title: str = "File watch"
@@ -133,9 +137,9 @@ class AgentAction:
     prompt: str = "File {{type}}: {{path}}"
     command: tuple[str, ...] | None = None
     cwd: str | None = None
-    timeout_seconds: float = 600.0
+    timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS
     model: str | None = None
-    max_steps: int = 24
+    max_steps: int = DEFAULT_AGENT_MAX_STEPS
     dingtalk: DingTalkRef | None = None
 
 

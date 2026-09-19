@@ -13,7 +13,7 @@ from filewatch.agent.sandbox import default_protected_roots
 from filewatch.agent.tools import build_default_registry
 from filewatch.agent.types import ToolCall, ToolContext
 from filewatch.llm import LlmError, chat_messages
-from filewatch.models import FileEvent
+from filewatch.models import DEFAULT_AGENT_MAX_STEPS, DEFAULT_AGENT_TIMEOUT_SECONDS, FileEvent
 from filewatch.paths import to_posix
 
 SYSTEM_PROMPT = """你是 filewatch 内置智能体，在指定工作区内完成用户任务。
@@ -87,8 +87,8 @@ def run_builtin_agent(
     workspace: Path,
     job_id: str,
     log_dir: Path,
-    timeout_seconds: float = 600.0,
-    max_steps: int = 24,
+    timeout_seconds: float = DEFAULT_AGENT_TIMEOUT_SECONDS,
+    max_steps: int = DEFAULT_AGENT_MAX_STEPS,
     model: str | None = None,
     suppress: Callable[[str, float], None] | None = None,
     registry: ToolRegistry | None = None,

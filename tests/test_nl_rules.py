@@ -212,9 +212,63 @@ def test_unique_name_when_appending() -> None:
 
 
 def test_llm_garbage_is_bad_config() -> None:
-    result = rules_from_text("新建 markdown", complete=lambda _s, _u: "抱歉，我不能输出 JSON")
+    calls: list[str] = []
+
+    def complete(_system: str, user: str) -> str:
+        calls.append(user)
+        return "抱歉，我不能输出 JSON"
+
+    result = rules_from_text("新建 markdown", complete=complete)
     assert result["ok"] is False
     assert result["error"] == "bad_config"
+    assert result["retried"] is True
+    assert len(calls) == 2
+    assert "错误原因" in calls[1]
+    assert "抱歉，我不能输出 JSON" in calls[1]
+
+
+def test_llm_retries_once_then_succeeds() -> None:
+    calls: list[str] = []
+    good = {
+        "notes": ["已修正"],
+        "rules": [
+            {
+                "name": "change-md",
+                "when": {"types": ["created", "modified"], "glob": ["**/*.md"], "is_dir": False},
+                "then": [{"notify": {"title": "Markdown 有变化", "message": "{{type}}: {{path}}"}}],
+            }
+        ],
+    }
+
+    def complete(_system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            return "不是 JSON"
+        return json.dumps(good)
+
+    result = rules_from_text("新建 markdown 时通知我", complete=complete)
+    assert result["ok"] is True
+    assert result["retried"] is True
+    assert "已根据上次错误重试并修正" in result["notes"]
+    assert result["rules"][0]["name"] == "change-md"
+    assert len(calls) == 2
+    assert "错误码：bad_config" in calls[1]
+
+
+def test_llm_not_configured_does_not_retry() -> None:
+    from filewatch.llm import LlmError
+
+    calls = {"n": 0}
+
+    def complete(_system: str, _user: str) -> str:
+        calls["n"] += 1
+        raise LlmError("llm_not_configured", "请先在设置页填写 LLM API Key")
+
+    result = rules_from_text("新建 markdown 时通知我", complete=complete)
+    assert result["ok"] is False
+    assert result["error"] == "llm_not_configured"
+    assert "retried" not in result
+    assert calls["n"] == 1
 
 
 def test_yaml_exclude_rule_is_parsed() -> None:
@@ -324,3 +378,27 @@ def test_edit_empty_text() -> None:
     result = edit_rule_from_text("   ", current=_notify_rule())
     assert result["ok"] is False
     assert result["error"] == "empty_text"
+
+
+def test_edit_rule_retries_once_then_succeeds() -> None:
+    calls: list[str] = []
+    fixed = _notify_rule()
+    fixed["when"]["glob"] = ["**/*.txt"]
+
+    def complete(_system: str, user: str) -> str:
+        calls.append(user)
+        if len(calls) == 1:
+            return "not json at all"
+        return json.dumps({"notes": ["已改 glob"], "rule": fixed})
+
+    result = edit_rule_from_text(
+        "改成只匹配 txt",
+        current=_notify_rule(),
+        existing_names=["change-md"],
+        complete=complete,
+    )
+    assert result["ok"] is True
+    assert result["retried"] is True
+    assert result["rule"]["when"]["glob"] == ["**/*.txt"]
+    assert len(calls) == 2
+    assert "上次模型输出" in calls[1]

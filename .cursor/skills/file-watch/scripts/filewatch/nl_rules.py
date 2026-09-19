@@ -22,7 +22,7 @@ FIELD_CONSTRAINTS = """- when.types 只能是 created / modified / deleted / mov
 - 用户没说任务要求/启动智能体/处理文件时，正向规则 then 只含 notify
 - 用户提到钉钉/群机器人时，notify.dingtalk 设为 true（用设置页默认渠道）；指定了渠道名或 id 则写 {"channel":"id"}。不要把 webhook/secret 写进规则
 - 文件变化的钉钉是按分钟汇总推送；若同时有 builtin 智能体，完成后会立刻把最后一轮回复推到同一渠道，不要改成即时 webhook
-- 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null,"dingtalk":null}}
+- 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":1800,"max_steps":24,"command":null,"cwd":null,"model":null,"dingtalk":null}}
 - 用户同时要任务要求和钉钉时，agent.dingtalk 与 notify.dingtalk 用同一渠道引用（true 或 {"channel":"id"}）
 - agent.runner 默认 builtin（调用设置页 LLM）；高级用法才用 command（须 command 字符串数组）或 cursor_sdk
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
@@ -128,6 +128,81 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise ConfigError("LLM 输出不是 JSON 对象")
 
 
+_NO_RETRY_ERRORS = frozenset({"llm_not_configured", "llm_auth", "empty_text"})
+_PREVIOUS_OUTPUT_LIMIT = 4000
+
+
+def _clip_text(text: str, limit: int = _PREVIOUS_OUTPUT_LIMIT) -> str:
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit] + "\n…(截断)"
+
+
+def _retry_user(original_user: str, *, error: str, message: str, previous_output: str) -> str:
+    parts = [
+        original_user,
+        "",
+        "上次生成失败，请根据错误修正后重新输出符合约束的 JSON 对象，不要 markdown。",
+        f"错误码：{error}",
+        f"错误原因：{message}",
+    ]
+    clipped = _clip_text(previous_output) if previous_output else ""
+    if clipped:
+        parts.extend(["", "上次模型输出：", clipped])
+    return "\n".join(parts)
+
+
+def _llm_once(
+    complete_fn: Callable[[str, str], str],
+    system: str,
+    user: str,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str, str | None, str | None]:
+    try:
+        raw = complete_fn(system, user)
+    except LlmError as exc:
+        return None, "", exc.error, exc.message
+    try:
+        payload = extract_json_object(raw)
+        return normalize(payload), raw, None, None
+    except (ConfigError, json.JSONDecodeError, ValueError) as exc:
+        return None, raw, "bad_config", f"LLM 输出无法校验：{exc}"
+
+
+def _complete_with_retry(
+    complete_fn: Callable[[str, str], str],
+    system: str,
+    user: str,
+    normalize: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    success_note: str,
+) -> dict[str, Any]:
+    result, raw, error, message = _llm_once(complete_fn, system, user, normalize)
+    if result is not None:
+        result["notes"] = [success_note, *result["notes"]]
+        return result
+    if error in _NO_RETRY_ERRORS:
+        return {"ok": False, "error": error, "message": message}
+    retry_user = _retry_user(
+        user,
+        error=error or "bad_config",
+        message=message or "未知错误",
+        previous_output=raw,
+    )
+    result, _raw2, error2, message2 = _llm_once(complete_fn, system, retry_user, normalize)
+    if result is not None:
+        result["notes"] = [success_note, "已根据上次错误重试并修正", *result["notes"]]
+        result["retried"] = True
+        return result
+    return {
+        "ok": False,
+        "error": error2 or error or "bad_config",
+        "message": message2 or message or "LLM 输出无法校验",
+        "retried": True,
+    }
+
+
 def _list_notes(payload: dict[str, Any], key: str) -> list[str]:
     raw = payload.get(key)
     if not isinstance(raw, list):
@@ -229,16 +304,13 @@ def rules_from_text(
     ding_hint = _dingtalk_hint()
     user = f"已有规则名：{names}（不要修改这些规则，只新增）\n{ding_hint}\n用户描述：\n{stripped}"
     complete_fn = complete or chat_complete
-    try:
-        raw = complete_fn(SYSTEM_PROMPT, user)
-        payload = extract_json_object(raw)
-        result = _normalize_generated(payload, existing_names=taken)
-        result["notes"] = ["由 LLM 生成", *result["notes"]]
-        return result
-    except LlmError as exc:
-        return {"ok": False, "error": exc.error, "message": exc.message}
-    except (ConfigError, json.JSONDecodeError, ValueError) as exc:
-        return {"ok": False, "error": "bad_config", "message": f"LLM 输出无法校验：{exc}"}
+    return _complete_with_retry(
+        complete_fn,
+        SYSTEM_PROMPT,
+        user,
+        lambda payload: _normalize_generated(payload, existing_names=taken),
+        success_note="由 LLM 生成",
+    )
 
 
 def edit_rule_from_text(
@@ -276,16 +348,13 @@ def edit_rule_from_text(
         f"其它已有规则名：{others}\n{ding_hint}\n用户指令：\n{stripped}"
     )
     complete_fn = complete or chat_complete
-    try:
-        raw = complete_fn(EDIT_SYSTEM_PROMPT, user)
-        payload = extract_json_object(raw)
-        result = _normalize_edited_rule(payload, current=current, other_names=other_names)
-        result["notes"] = ["由 LLM 编辑", *result["notes"]]
-        return result
-    except LlmError as exc:
-        return {"ok": False, "error": exc.error, "message": exc.message}
-    except (ConfigError, json.JSONDecodeError, ValueError) as exc:
-        return {"ok": False, "error": "bad_config", "message": f"LLM 输出无法校验：{exc}"}
+    return _complete_with_retry(
+        complete_fn,
+        EDIT_SYSTEM_PROMPT,
+        user,
+        lambda payload: _normalize_edited_rule(payload, current=current, other_names=other_names),
+        success_note="由 LLM 编辑",
+    )
 
 
 def merge_rules(
