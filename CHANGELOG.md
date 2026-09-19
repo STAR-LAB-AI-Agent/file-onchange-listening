@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.1.0 - 2026-09-19
+
+### 新增
+
+- 可读文本的行级变化：事件仍按 `watch.debounce_ms` 入账；`watch.line_diff_quiet_ms`（默认 2 秒）后再结算 `line_changes`（`+N / −M`）。二进制、过大或尚无基线为 `skipped`，结算前为 `pending`。规则匹配仍按文件级。
+- 网页任务详情可展开查看增减行。
+
 ## 2.0.6 - 2026-09-17
 
 ### 新增

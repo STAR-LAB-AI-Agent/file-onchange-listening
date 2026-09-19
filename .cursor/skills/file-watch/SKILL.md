@@ -9,7 +9,7 @@ description: >-
 
 # 文件监听
 
-版本 **2.0.6**。
+版本 **2.1.0**。
 
 CLI 在本 skill 的 `scripts/` 里，随 skill 一起安装。不要自己写 watcher，也不要依赖仓库根目录的 `src/`。
 
@@ -38,7 +38,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 ```text
 1. list（按 path 对上已有实例）
    - 已有 → 记下 watch_id 和 home，读 home/config.json 当底稿
-     （保留其 watch.path / recursive / debounce_ms / ignore 和全部旧规则）
+     （保留其 watch.path / recursive / debounce_ms / line_diff_quiet_ms / ignore 和全部旧规则）
    - 没有 → 再 init 或新建 watch.yaml
 2. 把自然语言合并进这份配置的 rules（追加则留旧规则；用户说替换才清空）。
    用户提到工作日/周末/几点到几点/上班时间等 → 写 when.active；没说时段则省略（一直生效）。
@@ -183,7 +183,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 在本机打开任务面板。首页按监听目录列出任务；详情分「文件变化」和「监听规则」：
 
-- 文件变化：该目录的新建 / 修改 / 删除 / 移动
+- 文件变化：该目录的新建 / 修改 / 删除 / 移动；可读文本在安静 `line_diff_quiet_ms`（默认 2 秒）后显示行级 `+N / −M`，可展开查看增减行
 - 监听规则：手动添加（任务要求非空即 builtin 智能体；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言生成（调用 LLM；也可粘贴 YAML/JSON，不经模型）。已运行则热更新，未运行则写入配置等下次 start
 - 设置：`/settings` 填写兼容 OpenAI 的 `base_url` / `model` / API Key，以及钉钉群机器人（名称、Webhook、SEC）。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`。规则里不要再写钉钉 webhook
 
@@ -210,6 +210,7 @@ watch:
   path: D:/data/inbox
   recursive: true
   debounce_ms: 400
+  line_diff_quiet_ms: 2000
   ignore: ["**/.git/**", "**/__pycache__/**", "**/*.tmp"]
 rules:
   - name: new-markdown
@@ -283,6 +284,8 @@ stop
 ```
 
 没有配置规则时，改为 `wait --stream events`。
+
+`events` 流里，可读文本文件会附带 `line_changes`（行级增删）。事件仍按 `watch.debounce_ms`（默认 400ms）入账；行级快照另等 `watch.line_diff_quiet_ms`（默认 2000ms）该文件无新事件后再结算，结果按 `event_id` 合并进读取。规则匹配仍按文件级，不读行内容。二进制 / 过大 / 尚无基线时为 `kind: skipped`。结算前可能是 `kind: pending`。
 
 先 `status` / `list`，已有同类 watcher 就复用，不要对同一路径再开一个守护进程。改规则先读 `home/config.json` 再 `reload`；未运行则 `start --config` 该配置。不要对已有路径 `start --path`。
 

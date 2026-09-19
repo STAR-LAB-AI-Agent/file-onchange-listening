@@ -1,6 +1,6 @@
 # filewatch
 
-版本 **2.0.6**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
+版本 **2.1.0**。给通用 Agent 用的目录监听工具。CLI 放在 skill 的 `scripts/` 里，复制整个 `.cursor/skills/file-watch/` 即可打包安装。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -104,7 +104,7 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py start --config .cursor
 python .cursor/skills/file-watch/scripts/filewatch_cli.py serve --port 8765
 ```
 
-浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。首页按监听目录列出任务；详情里可以看文件变化，也可以在「监听规则」里手动添加或用自然语言生成规则。口语会调用 LLM，请先打开「设置」填写 API Key（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
+浏览器打开输出 JSON 中的 `url`（默认 http://127.0.0.1:8765/ ）。首页按监听目录列出任务；详情里可以看文件变化（可读文本会显示行级 `+N / −M`，可展开增减行），也可以在「监听规则」里手动添加或用自然语言生成规则。口语会调用 LLM，请先打开「设置」填写 API Key（也可设环境变量 `FILEWATCH_LLM_API_KEY` / `FILEWATCH_LLM_BASE_URL` / `FILEWATCH_LLM_MODEL`）。钉钉推送同样在设置页添加机器人，规则表单里从下拉栏选择。Key 和钉钉凭证保存在状态目录的 `settings.json`，接口不会回明文。粘贴 YAML/JSON 规则不经过模型。同一路径会复用已有任务；两个目录同名时，后者的 id 会带短哈希后缀。页面使用 [shadcn/ui](https://ui.shadcn.com/) 组件。
 
 改前端后在 `web/` 下构建，产物写入 `scripts/filewatch/webui/`：
 
