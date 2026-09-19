@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### 新增
+
+- 设置页可拉取当前 LLM 接口的模型列表（`GET {base_url}/models`），按字母顺序从下拉框选择；未保存的接口地址 / Key / 协议也可用于拉取。面板已开时也可 `POST /api/settings/models`。
+
 ## 2.1.3 - 2026-09-19
 
 ### 新增

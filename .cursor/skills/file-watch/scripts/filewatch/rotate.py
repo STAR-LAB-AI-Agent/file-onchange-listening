@@ -19,6 +19,7 @@ CURSOR_EPOCH = date(2020, 1, 1)
 CURSOR_SPAN = 100_000_000_000
 _STREAM_NAME = re.compile(r"^(events|jobs)-(\d{4}-\d{2}-\d{2})\.jsonl$")
 _DAEMON_NAME = re.compile(r"^daemon-(\d{4}-\d{2}-\d{2})\.log$")
+log = logging.getLogger("filewatch.rotate")
 
 
 def clamp_keep_days(value: Any, default: int = DEFAULT_KEEP_DAYS) -> int:
@@ -124,24 +125,37 @@ def _replace_or_merge(src: Path, dest: Path) -> None:
     if src.resolve() == dest.resolve():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        data = src.read_bytes() + dest.read_bytes()
-        dest.write_bytes(data)
-        src.unlink()
-        return
-    src.replace(dest)
+    try:
+        if dest.exists():
+            data = src.read_bytes() + dest.read_bytes()
+            dest.write_bytes(data)
+            src.unlink()
+            return
+        src.replace(dest)
+    except OSError:
+        # Windows：守护进程仍占用 daemon.log / events.jsonl 时不能改名。
+        log.debug("skip rotate %s -> %s", src, dest, exc_info=True)
+
+
+def _unlink_if_empty(path: Path) -> bool:
+    try:
+        empty = path.stat().st_size == 0
+    except OSError:
+        return True
+    if not empty:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return True
+    return True
 
 
 def migrate_legacy_stream(directory: Path, stream: str) -> None:
     legacy = directory / f"{stream}.jsonl"
     if not legacy.exists():
         return
-    try:
-        empty = legacy.stat().st_size == 0
-    except OSError:
-        return
-    if empty:
-        legacy.unlink(missing_ok=True)
+    if _unlink_if_empty(legacy):
         return
     dest = stream_file(directory, stream, file_mtime_date(legacy))
     _replace_or_merge(legacy, dest)
@@ -151,12 +165,7 @@ def migrate_legacy_daemon(directory: Path) -> None:
     legacy = directory / "daemon.log"
     if not legacy.exists():
         return
-    try:
-        empty = legacy.stat().st_size == 0
-    except OSError:
-        return
-    if empty:
-        legacy.unlink(missing_ok=True)
+    if _unlink_if_empty(legacy):
         return
     dest = daemon_file(directory, file_mtime_date(legacy))
     _replace_or_merge(legacy, dest)

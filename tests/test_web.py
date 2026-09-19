@@ -591,6 +591,9 @@ def test_web_health_and_invalid_requests(tmp_path: Path, monkeypatch) -> None:
         status, payload = _post(f"http://127.0.0.1:{port}/api/settings/test", {})
         assert status == 400
         assert payload["error"] == "llm_not_configured"
+        status, payload = _post(f"http://127.0.0.1:{port}/api/settings/models", {})
+        assert status == 400
+        assert payload["error"] == "llm_not_configured"
         status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/start", {})
         assert status == 400
         assert payload["error"] == "bad_request"
@@ -623,6 +626,37 @@ def test_web_health_and_invalid_requests(tmp_path: Path, monkeypatch) -> None:
             body = json.loads(exc.read().decode("utf-8"))
             assert exc.code == 400
             assert body["error"] == "bad_json"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_list_models(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    seen: dict = {}
+
+    def fake_list(data: dict) -> dict:
+        seen["data"] = data
+        return {
+            "ok": True,
+            "models": [{"id": "demo-a", "name": "demo-a"}, {"id": "demo-b", "name": "Demo B"}],
+            "message": "已拉取 2 个模型",
+        }
+
+    monkeypatch.setattr("filewatch.web.list_llm_models", fake_list)
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/settings/models",
+            {"base_url": "https://example.invalid/v1", "api_key": "sk-draft", "wire_api": "chat"},
+        )
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert payload["models"][1]["name"] == "Demo B"
+        assert seen["data"]["api_key"] == "sk-draft"
+        assert seen["data"]["base_url"] == "https://example.invalid/v1"
     finally:
         httpd.shutdown()
         httpd.server_close()
@@ -767,6 +801,49 @@ def test_web_save_watch_record_all(tmp_path: Path, monkeypatch) -> None:
         assert status == 400
         assert payload["error"] == "bad_request"
     finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_save_watch_record_all_when_legacy_log_locked(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import threading
+
+    from filewatch.runtime import WatchRuntime
+
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    legacy = store.dir / "daemon.log"
+    legacy.write_text("held by old daemon\n", encoding="utf-8")
+    config = parse_config_dict({"name": "inbox", "watch": {"path": str(inbox), "debounce_ms": 1}, "rules": []})
+    runtime = WatchRuntime(config, store)
+    store.write_pid(os.getpid())
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.is_set():
+            runtime._poll_control()
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        with legacy.open("a", encoding="utf-8"):
+            status, payload = _put(f"http://127.0.0.1:{port}/api/watchers/inbox/watch", {"record_all": False})
+        assert status == 200, payload
+        assert payload["ok"] is True
+        assert payload["record_all"] is False
+        assert payload["reloaded"] is True
+        assert runtime.config.watch.record_all is False
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
         httpd.shutdown()
         httpd.server_close()
 

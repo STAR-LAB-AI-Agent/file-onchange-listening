@@ -173,3 +173,31 @@ def test_save_watch_options_record_all(tmp_path: Path, monkeypatch) -> None:
     missing = save_watch_options("missing", record_all=True)
     assert missing["ok"] is False
     assert missing["error"] == "not_found"
+
+
+def test_save_watch_options_survives_locked_legacy_log(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _write_config("inbox", inbox)
+    from filewatch.service import save_watch_options, store_for
+
+    store = store_for("inbox")
+    (store.dir / "daemon.log").write_text("held by daemon\n", encoding="utf-8")
+    original = Path.replace
+
+    def busy_replace(self, target):
+        if self.name == "daemon.log":
+            raise PermissionError(32, "file in use")
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", busy_replace)
+    monkeypatch.setattr("filewatch.service.running_pid", lambda _store: (True, 1))
+    monkeypatch.setattr(
+        "filewatch.service.wait_reload",
+        lambda _store, generation, timeout: {"ok": True, "watch_id": "inbox", "generation": generation},
+    )
+    payload = save_watch_options("inbox", record_all=False)
+    assert payload["ok"] is True
+    assert payload["reloaded"] is True
+    assert (store.dir / "daemon.log").exists()

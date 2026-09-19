@@ -13,7 +13,7 @@ from filewatch.anthropic_compat import (
     openai_messages_to_anthropic,
     openai_tools_to_anthropic,
 )
-from filewatch.llm import chat_complete, chat_messages
+from filewatch.llm import chat_complete, chat_messages, list_llm_models, parse_llm_models
 from filewatch.responses_compat import (
     build_responses_body,
     is_responses_wire,
@@ -359,3 +359,76 @@ def test_chat_messages_responses(monkeypatch) -> None:
     assert seen["body"]["input"] == [{"role": "user", "content": "hi"}]
     assert seen["body"]["tools"][0]["type"] == "function"
     assert message["content"] == "done"
+
+
+def test_parse_llm_models_openai_and_anthropic() -> None:
+    openai = parse_llm_models(
+        {"object": "list", "data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4.1", "object": "model"}]}
+    )
+    assert openai == [{"id": "gpt-4.1", "name": "gpt-4.1"}, {"id": "gpt-4o-mini", "name": "gpt-4o-mini"}]
+    assert parse_llm_models({"models": ["glm-5.3", "deepseek-chat", "Qwen3-max"]}) == [
+        {"id": "deepseek-chat", "name": "deepseek-chat"},
+        {"id": "glm-5.3", "name": "glm-5.3"},
+        {"id": "Qwen3-max", "name": "Qwen3-max"},
+    ]
+    anthropic = parse_llm_models(
+        {"data": [{"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5"}, {"id": "claude-sonnet-4-5"}]}
+    )
+    assert anthropic == [{"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"}]
+    assert parse_llm_models({"models": ["deepseek-chat", "deepseek-reasoner"]}) == [
+        {"id": "deepseek-chat", "name": "deepseek-chat"},
+        {"id": "deepseek-reasoner", "name": "deepseek-reasoner"},
+    ]
+    assert parse_llm_models([{"name": "llama3:latest"}]) == [{"id": "llama3:latest", "name": "llama3:latest"}]
+    assert parse_llm_models({"ok": True}) == []
+
+
+def test_list_llm_models_uses_saved_and_overrides(monkeypatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_urlopen(request: Any, timeout: float | None = None) -> FakeResponse:
+        seen["url"] = request.full_url
+        seen["method"] = request.get_method()
+        seen["headers"] = {k.lower(): v for k, v in request.header_items()}
+        seen["timeout"] = timeout
+        return FakeResponse({"data": [{"id": "demo-a"}, {"id": "demo-b", "display_name": "Demo B"}]})
+
+    monkeypatch.setattr(
+        "filewatch.llm.load_llm_config",
+        lambda: LlmConfig(base_url="https://api.openai.com/v1", api_key="sk-saved", model="gpt-4o-mini", wire_api="chat"),
+    )
+    monkeypatch.setattr("filewatch.llm.urllib.request.urlopen", fake_urlopen)
+    result = list_llm_models()
+    assert result["ok"] is True
+    assert result["models"] == [{"id": "demo-a", "name": "demo-a"}, {"id": "demo-b", "name": "Demo B"}]
+    assert seen["url"] == "https://api.openai.com/v1/models"
+    assert seen["method"] == "GET"
+    assert seen["headers"]["authorization"] == "Bearer sk-saved"
+
+    result = list_llm_models(
+        {
+            "base_url": "https://api.anthropic.com/v1",
+            "api_key": "sk-ant",
+            "wire_api": "anthropic",
+        }
+    )
+    assert result["ok"] is True
+    assert seen["url"] == "https://api.anthropic.com/v1/models"
+    assert seen["headers"]["x-api-key"] == "sk-ant"
+    assert seen["headers"]["anthropic-version"] == ANTHROPIC_VERSION
+
+
+def test_list_llm_models_requires_key(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "filewatch.llm.load_llm_config",
+        lambda: LlmConfig(base_url="https://api.openai.com/v1", api_key="", model="gpt-4o-mini"),
+    )
+    result = list_llm_models()
+    assert result["ok"] is False
+    assert result["error"] == "llm_not_configured"
+    result = list_llm_models({"base_url": "not-a-url", "api_key": "sk"})
+    assert result["ok"] is False
+    assert result["error"] == "bad_request"
+    result = list_llm_models({"wire_api": "bogus", "api_key": "sk", "base_url": "https://api.openai.com/v1"})
+    assert result["ok"] is False
+    assert result["message"] == "wire_api 须为 chat、responses 或 anthropic"

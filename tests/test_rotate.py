@@ -11,6 +11,8 @@ from filewatch.rotate import (
     decode_cursor,
     encode_cursor,
     keep_days,
+    migrate_legacy_daemon,
+    migrate_legacy_stream,
     prune_agent_logs,
 )
 
@@ -31,6 +33,25 @@ def test_keep_days_env(tmp_path: Path, monkeypatch) -> None:
     assert keep_days() == 1
     monkeypatch.setenv("FILEWATCH_LOG_KEEP_DAYS", "9999")
     assert keep_days() == 365
+
+
+def test_migrate_legacy_skips_when_file_busy(tmp_path: Path, monkeypatch) -> None:
+    daemon = tmp_path / "daemon.log"
+    daemon.write_text("busy\n", encoding="utf-8")
+    events = tmp_path / "events.jsonl"
+    events.write_text('{"id":"x"}\n', encoding="utf-8")
+    original = Path.replace
+
+    def busy_replace(self, target):
+        if self.name in {"daemon.log", "events.jsonl"}:
+            raise PermissionError(32, "file in use")
+        return original(self, target)
+
+    monkeypatch.setattr(Path, "replace", busy_replace)
+    migrate_legacy_daemon(tmp_path)
+    migrate_legacy_stream(tmp_path, "events")
+    assert daemon.read_text(encoding="utf-8") == "busy\n"
+    assert events.read_text(encoding="utf-8") == '{"id":"x"}\n'
 
 
 def test_daily_file_stream_rolls(tmp_path: Path) -> None:

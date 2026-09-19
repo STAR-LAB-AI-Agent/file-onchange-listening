@@ -215,6 +215,8 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 
 用户说测一下 Key / LLM 连不通：打开设置页，点「保存并测试连接」。面板已开时也可 `POST /api/settings/test`（无 body）。没有对应 CLI 子命令。
 
+用户说拉一下模型列表 / 有哪些模型：打开设置页，点「拉取模型列表」，再从下拉框选择。不必先保存；面板已开时也可 `POST /api/settings/models`，body 可带未保存的 `base_url` / `api_key` / `wire_api`。没有对应 CLI 子命令。
+
 旧规则里的 `notify.dingtalk.webhook` / `secret` 仍能运行。写新规则或改旧规则时，把凭证迁到 `dingtalk.channels`，规则改成渠道引用。
 
 ## 网页
@@ -224,7 +226,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 - 文件变化：该目录的新建 / 修改 / 删除 / 移动；可按文件名或路径搜索，并与类型、时间筛选一起用。内容未变的 `modified`（仅时间戳/属性、编辑器空保存等）不入列表。可读文本在安静 `line_diff_quiet_ms`（默认 30 秒，可在设置页改）后显示行级 `+N / −M`，可展开查看增减行；列表不保留「行级结算中…」，同路径未结算的中间修改会被后一条替换。同一文件在约 45 秒内反复出现（默认 ≥6 次）时，文件变化列表上方会单独列出候选，可全选或勾选多个后加入同一条排除规则。添加目录时可关掉「默认监听全部文件变化」，之后也可在任务页切换；关掉后只记录命中正向规则的文件
 - 监听规则：手动添加（任务要求非空即 builtin 智能体，超时默认 1800 秒、表单可改；也可添加反向规则排除某类文件；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效；可选正则、冷却秒数、最小体积、「写入 jobs 邮箱」）。列表可开关「启用」（`enabled: false` 停用但保留）或删除规则。或用自然语言添加新规则（只追加，不改已有规则；调用 LLM；输出无法校验或调用失败时携带错误原因和上次输出再试一轮；也可粘贴 YAML/JSON，不经模型）。打开规则编辑后，可在表单顶部用自然语言由 AI 填入该条，确认后再保存。已运行则热更新，未运行则写入配置等下次 start。选了钉钉且填写了任务要求时，智能体完成后立刻把最后一轮回复推到该群。
 - 智能体：只列出填写了任务要求的规则；点进某条后，该规则的执行过程以 SSE 实时日志按轮次展示（system / user / agent / 工具命令，可展开）。工具日志仍写入 `home/agent-logs/<job_id>.jsonl`
-- 设置：`/settings` 填写 `base_url` / `model` / API Key，并选择协议 `wire_api`（`chat` 走 `/chat/completions`，`responses` 走 `/responses`，`anthropic` 走 `/messages`）。接口地址旁可打开常见端点列表（国产 Chat Completions、Anthropic Messages、Responses）一键填入。保存时可「保存并测试连接」。钉钉群机器人（名称、Webhook、SEC），每条可「发送测试」立刻推一条消息。以及事件入账去抖、行级快照等待和最大文件、日志保留天数。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`、`FILEWATCH_LLM_WIRE_API`。规则里不要再写钉钉 webhook
+- 设置：`/settings` 填写 `base_url` / `model` / API Key，并选择协议 `wire_api`（`chat` 走 `/chat/completions`，`responses` 走 `/responses`，`anthropic` 走 `/messages`）。接口地址旁可打开常见端点列表（国产 Chat Completions、Anthropic Messages、Responses）一键填入。模型可点「拉取模型列表」从当前接口 `GET /models` 取回后下拉选择，也可继续手填。保存时可「保存并测试连接」。钉钉群机器人（名称、Webhook、SEC），每条可「发送测试」立刻推一条消息。以及事件入账去抖、行级快照等待和最大文件、日志保留天数。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`、`FILEWATCH_LLM_WIRE_API`。规则里不要再写钉钉 webhook
 
 用户要打开面板时：
 

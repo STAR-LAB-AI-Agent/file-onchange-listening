@@ -115,9 +115,12 @@ class WatchStore:
 
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        migrate_legacy_stream(self.dir, "events")
-        migrate_legacy_stream(self.dir, "jobs")
-        migrate_legacy_daemon(self.dir)
+        try:
+            migrate_legacy_stream(self.dir, "events")
+            migrate_legacy_stream(self.dir, "jobs")
+            migrate_legacy_daemon(self.dir)
+        except OSError:
+            pass
         self._upgrade_cursors()
         self.events_path.touch(exist_ok=True)
         self.jobs_path.touch(exist_ok=True)
@@ -219,7 +222,12 @@ class WatchStore:
                 stripped = line.strip()
                 if not stripped:
                     continue
-                records.append(json.loads(stripped))
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
                 if limit is not None and len(records) >= limit:
                     break
         return records, consumed
@@ -315,7 +323,12 @@ class WatchStore:
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    record = json.loads(stripped)
+                    try:
+                        record = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
                     if event_type and record.get("type") != event_type:
                         continue
                     if not record_matches_path_query(record, path_query):

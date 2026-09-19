@@ -52,6 +52,16 @@ def test_incomplete_last_line_is_not_consumed(tmp_path) -> None:
     assert [item["id"] for item in items] == ["2"]
 
 
+def test_read_skips_invalid_jsonl_lines(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.events_path.write_text('{"id":"ok"}\nnot-json\n{"id":"also"}\n', encoding="utf-8")
+    items, _ = store.read_since("events", 0)
+    assert [item["id"] for item in items] == ["ok", "also"]
+    queried = store.query_records("events", page=1, page_size=10)
+    assert [item["id"] for item in queried["items"]] == ["also", "ok"]
+
+
 def test_query_records_paginates_newest_first(tmp_path) -> None:
     store = WatchStore("demo", root=tmp_path)
     store.ensure()

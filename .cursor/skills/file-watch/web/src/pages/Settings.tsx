@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeftIcon, PlusIcon, Settings2Icon, Trash2Icon } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -92,6 +92,17 @@ function toDraft(channel: DingTalkChannel, index: number): ChannelDraft {
   }
 }
 
+type LlmModelOption = {
+  id: string
+  name?: string
+}
+
+function modelOptionLabel(item: LlmModelOption): string {
+  const name = (item.name || "").trim()
+  if (name && name !== item.id) return `${name}（${item.id}）`
+  return item.id
+}
+
 function blankChannel(): ChannelDraft {
   return {
     key: `new-${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -121,6 +132,8 @@ export function SettingsPage() {
   const [message, setMessage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [testingKey, setTestingKey] = useState<string | null>(null)
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [modelOptions, setModelOptions] = useState<LlmModelOption[]>([])
   const [endpointHelpOpen, setEndpointHelpOpen] = useState(false)
   const [dingReady, setDingReady] = useState(false)
   const channelsRef = useRef(channels)
@@ -158,6 +171,7 @@ export function SettingsPage() {
     if (!model.trim() || model.trim() === prevModel) {
       setModel(defaultModel(next))
     }
+    setModelOptions([])
     setWireApi(next)
   }
 
@@ -165,6 +179,7 @@ export function SettingsPage() {
     setBaseUrl(item.endpoint)
     const example = firstExampleModel(item.models)
     if (example) setModel(example)
+    setModelOptions([])
     setEndpointHelpOpen(false)
   }
 
@@ -226,6 +241,39 @@ export function SettingsPage() {
       setSaving(false)
     }
   }
+
+  async function fetchModels() {
+    setLoadingModels(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const data = await api<{ models?: LlmModelOption[]; message?: string }>("/api/settings/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wire_api: wireApi,
+          base_url: baseUrl.trim(),
+          api_key: apiKey,
+        }),
+      })
+      const options = (data.models || []).filter((item) => item.id.trim())
+      setModelOptions(options)
+      setMessage(data.message || `已拉取 ${options.length} 个模型`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "拉取模型列表失败")
+    } finally {
+      setLoadingModels(false)
+    }
+  }
+
+  const selectOptions = useMemo(() => {
+    const current = model.trim()
+    const extras =
+      current && !modelOptions.some((item) => item.id === current) ? [{ id: current, name: current }] : []
+    return [...extras, ...modelOptions].sort((left, right) =>
+      left.id.localeCompare(right.id, undefined, { sensitivity: "base" }),
+    )
+  }, [model, modelOptions])
 
   async function clearKey() {
     setSaving(true)
@@ -445,19 +493,55 @@ export function SettingsPage() {
             <Input
               id="base-url"
               value={baseUrl}
-              onChange={(event) => setBaseUrl(event.target.value)}
+              onChange={(event) => {
+                setBaseUrl(event.target.value)
+                if (modelOptions.length) setModelOptions([])
+              }}
               placeholder={defaultBaseUrl(wireApi)}
               className="font-mono"
             />
           </div>
           <div className="grid gap-1.5">
-            <Label htmlFor="model">模型</Label>
-            <Input
-              id="model"
-              value={model}
-              onChange={(event) => setModel(event.target.value)}
-              placeholder={defaultModel(wireApi)}
-            />
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="model">模型</Label>
+              <div className="flex items-center gap-1">
+                {modelOptions.length > 0 ? (
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setModelOptions([])}>
+                    手动输入
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void fetchModels()}
+                  disabled={loadingModels || saving}
+                >
+                  {loadingModels ? "拉取中…" : "拉取模型列表"}
+                </Button>
+              </div>
+            </div>
+            {modelOptions.length > 0 ? (
+              <Select value={model} onValueChange={setModel}>
+                <SelectTrigger id="model">
+                  <SelectValue placeholder={defaultModel(wireApi)}>{model || defaultModel(wireApi)}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {selectOptions.map((item) => (
+                    <SelectItem key={item.id} value={item.id}>
+                      {modelOptionLabel(item)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Input
+                id="model"
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+                placeholder={defaultModel(wireApi)}
+              />
+            )}
           </div>
           <div className="grid gap-1.5">
             <Label htmlFor="api-key">API Key</Label>

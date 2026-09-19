@@ -304,7 +304,12 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, options)
+  let response: Response
+  try {
+    response = await fetch(url, options)
+  } catch {
+    throw new ApiError("无法连接服务，请确认面板仍在运行", "network")
+  }
   const data = (await response.json()) as T & { ok?: boolean; message?: string; error?: string }
   if (!response.ok || data.ok === false) {
     throw new ApiError(data.message || `请求失败 ${response.status}`, data.error)

@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from filewatch.agent_logs import read_agent_logs
-from filewatch.llm import test_llm_connection
+from filewatch.llm import list_llm_models, test_llm_connection
 from filewatch.models import DEFAULT_DEBOUNCE_MS, DEFAULT_LINE_DIFF_MAX_BYTES, DEFAULT_LINE_DIFF_QUIET_MS, EVENT_TYPES
 from filewatch.paths import state_root
 from filewatch.process import claim_listen_port, pid_alive, terminate_pid
@@ -57,6 +57,18 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         if " /api/" in f" {line}" and ("/events" in line or "/agent-logs" in line):
             return
         log.info("%s - %s", self.address_string(), line)
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
+        except Exception:
+            log.exception("request failed: %s", getattr(self, "path", ""))
+            try:
+                self._json(500, {"ok": False, "error": "internal", "message": "服务处理请求时出错"})
+            except Exception:
+                return
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -180,6 +192,10 @@ class WatchWebHandler(BaseHTTPRequestHandler):
         data = body if isinstance(body, dict) else {}
         if path == "/api/settings/test":
             payload = test_llm_connection()
+            self._json(200 if payload.get("ok") else 400, payload)
+            return
+        if path == "/api/settings/models":
+            payload = list_llm_models(data)
             self._json(200 if payload.get("ok") else 400, payload)
             return
         if path == "/api/settings/dingtalk/test":
@@ -509,12 +525,15 @@ class WatchWebHandler(BaseHTTPRequestHandler):
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
 
     def _send_file(self, path: Path, content_type: str | None = None) -> None:
         if not path.exists() or not path.is_file():
