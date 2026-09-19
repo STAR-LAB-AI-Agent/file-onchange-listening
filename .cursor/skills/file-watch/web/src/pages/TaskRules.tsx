@@ -291,21 +291,12 @@ export function TaskRules({ watchId }: { watchId: string }) {
               <PlusIcon data-icon="inline-start" />
               手动添加
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="ml-2"
-              onClick={() => openEditor(null, blankRule(true))}
-            >
-              <PlusIcon data-icon="inline-start" />
-              添加排除规则
-            </Button>
           </div>
           {rules.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
               {info?.record_all === false
                 ? "还没有规则。当前只记录命中正向规则的文件，添加规则后才会出现文件变化。"
-                : "还没有规则。默认会记录全部文件变化。添加排除规则可停止监听某类文件；正向规则命中后写入 jobs 邮箱。"}
+                : "还没有规则。默认会记录全部文件变化。手动添加时可切换为排除规则以停止监听某类文件；正向规则命中后写入 jobs 邮箱。"}
             </div>
           ) : (
             <div className="flex flex-col gap-3">
@@ -402,11 +393,9 @@ export function TaskRules({ watchId }: { watchId: string }) {
       >
         <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl">
           <DialogHeader className="shrink-0">
-            <DialogTitle>{editor?.index == null ? (editor?.rule.exclude ? "添加排除规则" : "添加规则") : "编辑规则"}</DialogTitle>
+            <DialogTitle>{editor?.index == null ? "添加规则" : "编辑规则"}</DialogTitle>
             <DialogDescription>
-              {editor?.rule.exclude
-                ? "排除规则命中后不再监听该类文件，也不会触发其它规则。"
-                : '各输入框下方有说明和示例。模板可用 {{path}} {{type}} {{filename}}。'}
+              各输入框下方有说明和示例。可在「规则类型」里切换通知/任务或排除监听。模板可用 {"{{path}} {{type}} {{filename}}"}。
             </DialogDescription>
           </DialogHeader>
           {editor ? (

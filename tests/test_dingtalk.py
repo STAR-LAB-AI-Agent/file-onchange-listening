@@ -11,6 +11,7 @@ from filewatch.config import ConfigError, config_to_dict, parse_config_dict
 from filewatch.dingtalk import (
     DingTalkBatcher,
     coalesce_items,
+    format_agent_reply,
     format_markdown,
     send_dingtalk,
     signed_webhook,
@@ -72,6 +73,55 @@ def test_format_markdown_truncates_long_payload() -> None:
     _, text = format_markdown(items)
     assert "其余条目已省略" in text
     assert len(text.encode("utf-8")) <= 18000
+
+
+def test_format_agent_reply_uses_last_text() -> None:
+    title, text = format_agent_reply("已重写 docs/a.md\n共 3 个文件")
+    assert title == "已重写 docs/a.md"
+    assert text == "已重写 docs/a.md\n共 3 个文件"
+
+
+def test_format_agent_reply_truncates_long_payload() -> None:
+    body = "总结\n" + ("很长的回复" * 4000)
+    title, text = format_agent_reply(body)
+    assert title == "总结"
+    assert "其余内容已省略" in text
+    assert len(text.encode("utf-8")) <= 18000
+
+
+def test_parse_agent_dingtalk_roundtrip() -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": "."},
+            "rules": [
+                {
+                    "name": "task",
+                    "when": {"types": ["created"]},
+                    "then": [
+                        {
+                            "agent": {
+                                "runner": "builtin",
+                                "prompt": "rewrite",
+                                "dingtalk": True,
+                            }
+                        },
+                        {
+                            "agent": {
+                                "runner": "builtin",
+                                "prompt": "rewrite",
+                                "dingtalk": {"channel": "work"},
+                            }
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert config.rules[0].then[0].dingtalk.channel == "*"  # type: ignore[union-attr]
+    dumped = config_to_dict(config)
+    assert dumped["rules"][0]["then"][0]["agent"]["dingtalk"] is True
+    assert dumped["rules"][0]["then"][1]["agent"]["dingtalk"] == {"channel": "work"}
 
 
 def test_parse_dingtalk_and_roundtrip() -> None:

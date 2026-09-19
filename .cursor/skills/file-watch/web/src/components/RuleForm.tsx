@@ -97,7 +97,9 @@ export function RuleForm({
   const [webhook, setWebhook] = useState(notify0?.webhook || "")
   const [mailbox, setMailbox] = useState(notify0?.mailbox !== false)
   const [channels, setChannels] = useState<DingTalkChannel[]>(channelsProp || [])
-  const [dingChannel, setDingChannel] = useState(() => dingtalkSelection(notify0?.dingtalk))
+  const [dingChannel, setDingChannel] = useState(
+    () => dingtalkSelection(notify0?.dingtalk) || dingtalkSelection(agent0?.dingtalk),
+  )
   const legacyDing =
     notify0?.dingtalk && typeof notify0.dingtalk === "object"
       ? {
@@ -165,6 +167,18 @@ export function RuleForm({
       })
       return
     }
+    const dingTalkValue =
+      dingChannel === "__legacy__" && legacyDing?.webhook
+        ? {
+            webhook: legacyDing.webhook,
+            secret: legacyDing.secret || null,
+            interval_seconds: legacyDing.interval_seconds || 60,
+          }
+        : dingChannel === "*"
+          ? true
+          : dingChannel
+            ? { channel: dingChannel }
+            : null
     const then: WatchRule["then"] = [
       {
         notify: {
@@ -172,18 +186,7 @@ export function RuleForm({
           message: message.trim() || "{{type}}: {{path}}",
           webhook: webhook.trim() || null,
           mailbox,
-          dingtalk:
-            dingChannel === "__legacy__" && legacyDing?.webhook
-              ? {
-                  webhook: legacyDing.webhook,
-                  secret: legacyDing.secret || null,
-                  interval_seconds: legacyDing.interval_seconds || 60,
-                }
-              : dingChannel === "*"
-                ? true
-                : dingChannel
-                  ? { channel: dingChannel }
-                  : null,
+          dingtalk: dingTalkValue,
         },
       },
     ]
@@ -196,6 +199,7 @@ export function RuleForm({
           command: null,
           timeout_seconds: 600,
           max_steps: 24,
+          dingtalk: dingTalkValue,
         },
       })
     }
@@ -470,14 +474,16 @@ export function RuleForm({
         </Select>
         {channels.length === 0 ? (
           <FieldHint>
-            命中后按分钟汇总推送，无变化不发送。请先到{" "}
+            文件变化按分钟汇总推送，无变化不发送。填写任务要求后，智能体完成会立刻推送最后一轮回复。请先到{" "}
             <button type="button" className="underline" onClick={() => navigate("/settings")}>
               设置
             </button>{" "}
             添加机器人，再从这里选择。
           </FieldHint>
         ) : (
-          <FieldHint>命中后按分钟汇总推到所选机器人，无变化不发送。选「不推送」则只走通知/任务。</FieldHint>
+          <FieldHint>
+            文件变化按分钟汇总推到所选机器人。填写了任务要求时，智能体完成后会立刻推送最后一轮回复（不按分钟汇总）。选「不推送」则只走通知/任务。
+          </FieldHint>
         )}
       </div>
       <div className="grid gap-1.5">
@@ -498,7 +504,8 @@ export function RuleForm({
           placeholder={"工作区是监听根目录。对 docs 下所有 .md 按参考格式重写。本次触发：{{type}} {{path}}"}
         />
         <FieldHint>
-          留空则只通知；填写后会启动内置智能体（调用设置页 LLM）。例：对 docs 下所有 .md 按参考格式重写。本次触发：
+          留空则只通知；填写后会启动内置智能体（调用设置页 LLM）。若选择了钉钉群，完成后立刻推送最后一轮回复。例：对 docs
+          下所有 .md 按参考格式重写。本次触发：
           {"{{type}} {{path}}"}
         </FieldHint>
       </div>

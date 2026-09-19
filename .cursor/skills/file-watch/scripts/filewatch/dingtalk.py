@@ -54,14 +54,21 @@ def coalesce_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [by_key[key] for key in order]
 
 
-def _fit_utf8(text: str, limit: int = MAX_MARKDOWN_BYTES) -> str:
+def _fit_utf8(text: str, limit: int = MAX_MARKDOWN_BYTES, omitted: str = "\n\n… 其余条目已省略") -> str:
     encoded = text.encode("utf-8")
     if len(encoded) <= limit:
         return text
-    omitted = "\n\n… 其余条目已省略"
     budget = max(0, limit - len(omitted.encode("utf-8")))
     cut = encoded[:budget].decode("utf-8", errors="ignore")
     return cut + omitted
+
+
+def format_agent_reply(text: str) -> tuple[str, str]:
+    """DingTalk markdown for a builtin agent's last assistant reply."""
+    body = (text or "").strip()
+    first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    preview = (first or "任务完成")[:20]
+    return preview, _fit_utf8(body, omitted="\n\n… 其余内容已省略")
 
 
 def format_markdown(items: list[dict[str, Any]]) -> tuple[str, str]:

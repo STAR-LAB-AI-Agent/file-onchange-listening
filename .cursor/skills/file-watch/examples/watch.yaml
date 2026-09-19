@@ -33,6 +33,7 @@ rules:
           message: "{{type}}: {{path}}"
           mailbox: true
           # 取消注释后，命中事件每分钟汇总推送到钉钉群（无变化不发送）。
+          # 若同一规则还有 builtin 智能体，完成后会立刻推送最后一轮回复。
           # dingtalk: true   # 使用设置页默认钉钉渠道
           # 或 dingtalk: { channel: work }
   # 反向规则：命中后不入账（文件变化和其它规则都不会触发）。record_all 为 true（默认）时仍会记录未排除的文件。
@@ -71,6 +72,7 @@ rules:
   #           本次触发：{{type}} {{path}}
   #         timeout_seconds: 600
   #         max_steps: 24
+  #         # dingtalk: true   # 完成后立刻推送最后一轮回复；省略则沿用上面 notify 的渠道
   # 高级：外部 command / cursor_sdk
   # - name: echo-agent
   #   when:

@@ -35,6 +35,7 @@ class AgentRunResult:
     steps: int = 0
     tool_calls: int = 0
     log_path: str | None = None
+    last_reply: str = ""
 
 
 def _parse_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
@@ -172,12 +173,14 @@ def run_builtin_agent(
             calls = _parse_tool_calls(message)
             messages.append(_assistant_message_for_history(message))
             if not calls:
+                last_reply = content.strip() if isinstance(content, str) and content.strip() else ""
                 result = AgentRunResult(
                     status="ok",
-                    output=(final_text or "（无输出）")[-4000:],
+                    output=(last_reply or final_text or "（无输出）")[-4000:],
                     steps=steps,
                     tool_calls=tool_call_count,
                     log_path=str(log_path),
+                    last_reply=last_reply[-4000:] if last_reply else "",
                 )
                 return result
             records = registry.dispatch(calls, ctx, logger=logger)

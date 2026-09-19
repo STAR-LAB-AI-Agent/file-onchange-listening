@@ -13,7 +13,7 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from filewatch.dingtalk import DingTalkBatcher
-from filewatch.models import AgentAction, FileEvent, NotifyAction, Rule
+from filewatch.models import AgentAction, DingTalkRef, FileEvent, NotifyAction, Rule
 from filewatch.store import WatchStore
 from filewatch.templates import render, render_argv
 
@@ -129,7 +129,7 @@ class ActionRunner:
                 output = self._run_cursor_sdk(prompt, cwd, action)
                 return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
             if action.runner == "builtin":
-                return self._run_builtin(action, event, prompt, cwd, job_id, rule.name)
+                return self._run_builtin(action, event, prompt, cwd, job_id, rule)
             output = self._run_command(action, event, extra, prompt, cwd)
             return {"status": "ok", "runner": action.runner, "prompt": prompt, "output": output[-4000:]}
         except Exception as exc:  # noqa: BLE001
@@ -158,7 +158,7 @@ class ActionRunner:
         prompt: str,
         cwd: str | None,
         job_id: str,
-        rule_name: str,
+        rule: Rule,
     ) -> dict[str, Any]:
         from filewatch.agent.loop import run_builtin_agent
 
@@ -175,7 +175,7 @@ class ActionRunner:
             model=action.model,
             suppress=self.suppress,
             meta={
-                "rule": rule_name,
+                "rule": rule.name,
                 "path": event.path,
                 "type": event.type,
                 "watch_id": event.watch_id,
@@ -194,7 +194,42 @@ class ActionRunner:
             record["error"] = result.error
         if result.message:
             record["message"] = result.message
+        record.update(self._push_builtin_dingtalk(action, rule, result.last_reply, result.status))
         return record
+
+    def _agent_dingtalk_ref(self, action: AgentAction, rule: Rule) -> DingTalkRef | None:
+        if action.dingtalk and action.dingtalk.enabled:
+            return action.dingtalk
+        for item in rule.then:
+            if isinstance(item, NotifyAction) and item.dingtalk and item.dingtalk.enabled:
+                return item.dingtalk
+        return None
+
+    def _push_builtin_dingtalk(
+        self,
+        action: AgentAction,
+        rule: Rule,
+        last_reply: str,
+        status: str,
+    ) -> dict[str, Any]:
+        ref = self._agent_dingtalk_ref(action, rule)
+        if ref is None:
+            return {}
+        if status != "ok":
+            return {"dingtalk": "skipped"}
+        text = (last_reply or "").strip()
+        if not text or text == "（无输出）":
+            return {"dingtalk": "skipped"}
+        try:
+            from filewatch.dingtalk import format_agent_reply, markdown_payload
+            from filewatch.settings import resolve_dingtalk
+
+            target = resolve_dingtalk(ref)
+            title, body = format_agent_reply(text)
+            self._send_dingtalk(target.webhook, target.secret, markdown_payload(title, body))
+            return {"dingtalk": "ok"}
+        except Exception as exc:  # noqa: BLE001
+            return {"dingtalk": "error", "dingtalk_error": str(exc)}
 
     def _run_command(
         self,

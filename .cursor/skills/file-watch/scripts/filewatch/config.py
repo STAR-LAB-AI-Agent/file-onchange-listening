@@ -242,15 +242,15 @@ def dump_active(window: ActiveWindow | None) -> dict[str, Any] | None:
     }
 
 
-def _parse_interval_seconds(raw: Any, *, default: float = 60.0) -> float:
+def _parse_interval_seconds(raw: Any, *, default: float = 60.0, field: str = "notify.dingtalk.interval_seconds") -> float:
     if raw is None or raw == "":
         return default
     try:
         interval_f = float(raw)
     except (TypeError, ValueError) as exc:
-        raise ConfigError("notify.dingtalk.interval_seconds 必须是数字") from exc
+        raise ConfigError(f"{field} 必须是数字") from exc
     if interval_f <= 0:
-        raise ConfigError("notify.dingtalk.interval_seconds 必须大于 0")
+        raise ConfigError(f"{field} 必须大于 0")
     return interval_f
 
 
@@ -261,7 +261,7 @@ def _normalize_channel(raw: str) -> str:
     return text
 
 
-def _parse_dingtalk(raw: Any) -> DingTalkRef | None:
+def _parse_dingtalk(raw: Any, *, field: str = "notify.dingtalk") -> DingTalkRef | None:
     if raw is None or raw is False:
         return None
     if raw is True:
@@ -272,10 +272,10 @@ def _parse_dingtalk(raw: Any) -> DingTalkRef | None:
             return None
         return DingTalkRef(channel=_normalize_channel(text))
     if not isinstance(raw, dict):
-        raise ConfigError("notify.dingtalk 必须是布尔值、渠道 id 或映射")
+        raise ConfigError(f"{field} 必须是布尔值、渠道 id 或映射")
     channel_raw = raw.get("channel")
     if channel_raw is not None and not isinstance(channel_raw, str) and not isinstance(channel_raw, bool):
-        raise ConfigError("notify.dingtalk.channel 必须是字符串")
+        raise ConfigError(f"{field}.channel 必须是字符串")
     if channel_raw is True:
         channel = DEFAULT_DINGTALK_CHANNEL
     elif isinstance(channel_raw, str):
@@ -284,19 +284,22 @@ def _parse_dingtalk(raw: Any) -> DingTalkRef | None:
         channel = None
     webhook_raw = raw.get("webhook")
     if webhook_raw is not None and not isinstance(webhook_raw, str):
-        raise ConfigError("notify.dingtalk.webhook 必须是字符串")
+        raise ConfigError(f"{field}.webhook 必须是字符串")
     webhook = (webhook_raw or "").strip()
     secret_raw = raw.get("secret", raw.get("sec"))
     if secret_raw is not None and not isinstance(secret_raw, str):
-        raise ConfigError("notify.dingtalk.secret 必须是字符串")
+        raise ConfigError(f"{field}.secret 必须是字符串")
     secret = (secret_raw or "").strip() or None
-    interval_f = _parse_interval_seconds(raw.get("interval_seconds", 60 if webhook else None))
+    interval_f = _parse_interval_seconds(
+        raw.get("interval_seconds", 60 if webhook else None),
+        field=f"{field}.interval_seconds",
+    )
     if webhook:
         if not webhook.startswith(("http://", "https://")):
-            raise ConfigError("notify.dingtalk.webhook 必须是 http(s) 地址")
+            raise ConfigError(f"{field}.webhook 必须是 http(s) 地址")
         return DingTalkRef(webhook=webhook, secret=secret, interval_seconds=interval_f)
     if secret and not channel:
-        raise ConfigError("填写钉钉 SEC 时必须同时提供 notify.dingtalk.webhook 或 channel")
+        raise ConfigError(f"填写钉钉 SEC 时必须同时提供 {field}.webhook 或 channel")
     if channel:
         return DingTalkRef(channel=channel)
     return None
@@ -336,7 +339,7 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             message=str(payload.get("message", "{{type}}: {{path}}")),
             webhook=webhook,
             mailbox=mailbox,
-            dingtalk=_parse_dingtalk(payload.get("dingtalk")),
+            dingtalk=_parse_dingtalk(payload.get("dingtalk"), field="notify.dingtalk"),
         )
     if kind == "agent":
         command = payload.get("command")
@@ -375,6 +378,7 @@ def _parse_action(raw: Any) -> NotifyAction | AgentAction:
             timeout_seconds=float(timeout),
             model=payload.get("model"),
             max_steps=max_steps_i,
+            dingtalk=_parse_dingtalk(payload.get("dingtalk"), field="agent.dingtalk"),
         )
     raise ConfigError(f"未知动作：{kind}")
 
@@ -639,6 +643,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
                             "timeout_seconds": action.timeout_seconds,
                             "model": action.model,
                             "max_steps": action.max_steps,
+                            "dingtalk": dump_dingtalk(action.dingtalk),
                         }
                     }
                 )

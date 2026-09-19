@@ -82,6 +82,7 @@ rules:
   #           本次触发：{{type}} {{path}}
   #         timeout_seconds: 600
   #         max_steps: 24
+  #         # dingtalk: true   # 完成后立刻推送最后一轮回复；省略则沿用上面 notify 的渠道
   # 高级：外部 command / cursor_sdk
   # - name: echo-agent
   #   when:

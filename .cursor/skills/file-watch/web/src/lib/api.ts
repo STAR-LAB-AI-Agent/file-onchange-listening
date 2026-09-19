@@ -47,6 +47,7 @@ export type AgentAction = {
   timeout_seconds?: number
   model?: string | null
   max_steps?: number
+  dingtalk?: DingTalkAction | string | boolean | null
 }
 
 export type RuleThen = {

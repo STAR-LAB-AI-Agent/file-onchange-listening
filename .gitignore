@@ -10,6 +10,10 @@ build/
 .coverage
 htmlcov/
 .filewatch/
+.tmp*
+VulnReport/
+reports/
+templates/
 *.log
 AGENTS.md
 node_modules/

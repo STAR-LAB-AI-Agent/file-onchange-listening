@@ -63,9 +63,9 @@ python .cursor/skills/file-watch/scripts/filewatch_cli.py
 - `then` 每项只能是 `notify` 或 `agent` 之一。反向规则 `exclude: true` 时 `then` 必须为空。
 - 模板变量只能用 `{{path}}` `{{filename}}` `{{type}}` `{{watch_id}}` `{{ts}}` `{{old_path}}` `{{json}}` `{{rule}}`。
 - 用户没说启动智能体/任务要求时，默认只写 `notify`（写入 jobs 邮箱）。
-- 用户要按文件变化执行任务时，写 `agent.runner: builtin`，把任务要求放进 `prompt`；会调用设置页 LLM，带 Read/Glob/Grep/Write/Bash/PowerShell 工具循环。
+- 用户要按文件变化执行任务时，写 `agent.runner: builtin`，把任务要求放进 `prompt`；会调用设置页 LLM，带 Read/Glob/Grep/Write/Bash/PowerShell 工具循环。规则里选了钉钉渠道时，完成后立刻推送智能体最后一轮回复。
 - 高级用法仍可用 `command` / `cursor_sdk`。
-- 用户要推到钉钉群时，**不要**把 Webhook/SEC 写进规则 YAML。先写入设置里的 `dingtalk.channels`（见「钉钉推送」），规则只写 `notify.dingtalk: true` 或 `{channel: 渠道id}`。命中后每分钟汇总一次，不要写成即时 `notify.webhook`。
+- 用户要推到钉钉群时，**不要**把 Webhook/SEC 写进规则 YAML。先写入设置里的 `dingtalk.channels`（见「钉钉推送」），规则只写 `notify.dingtalk: true` 或 `{channel: 渠道id}`。文件变化命中后每分钟汇总一次，不要写成即时 `notify.webhook`。同一规则若有内置智能体，任务完成后会立刻把最后一轮回复推到同一渠道。
 - 用户说不监听、排除、忽略某类文件时，写反向规则：`exclude: true`，`then` 为空，`when.glob` 如 `**/*.log`。命中后该文件不会进入 events，也不会触发其它规则。默认仍记录全部文件（另有 `watch.ignore` 默认忽略 `.git` / `*.tmp` 等）。用户说不要默认监听全部、添加规则后才听指定文件时，写 `watch.record_all: false`：没有正向规则则不入账，有规则则只记录 glob/类型能对上的文件。
 - 热更新时保留原来的 `watch.path` / `recursive`，除非用户明确要改监听目录。
 
@@ -161,7 +161,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 2. 原样保留 llm（不要清掉 API Key）
 3. 合并 dingtalk.channels：追加新渠道，或按 id / name 更新已有项
 4. 写回该文件
-5. 规则 notify.dingtalk 只引用渠道：true（第一条）或 {channel: "<id>"}
+5. 规则 notify.dingtalk 只引用渠道：true（第一条）或 {channel: "<id>"}。有 builtin 任务要求时也可写在 agent.dingtalk，或沿用同规则 notify 的渠道。
 ```
 
 渠道字段：
@@ -197,7 +197,7 @@ python scripts/filewatch_cli.py start --config <home>/config.json --id <watch_id
 在本机打开任务面板。首页按监听目录列出任务，名称默认为文件夹名、可改；详情分「文件变化」、「监听规则」和「智能体」：
 
 - 文件变化：该目录的新建 / 修改 / 删除 / 移动；可按文件名或路径搜索，并与类型、时间筛选一起用。内容未变的 `modified`（仅时间戳/属性、编辑器空保存等）不入列表。可读文本在安静 `line_diff_quiet_ms`（默认 30 秒，可在设置页改）后显示行级 `+N / −M`，可展开查看增减行；列表不保留「行级结算中…」，同路径未结算的中间修改会被后一条替换。添加目录时可关掉「默认监听全部文件变化」，之后也可在任务页切换；关掉后只记录命中正向规则的文件
-- 监听规则：手动添加（任务要求非空即 builtin 智能体；也可添加反向规则排除某类文件；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言添加新规则（只追加，不改已有规则；调用 LLM；也可粘贴 YAML/JSON，不经模型）。打开规则编辑后，可在表单顶部用自然语言由 AI 填入该条，确认后再保存。已运行则热更新，未运行则写入配置等下次 start
+- 监听规则：手动添加（任务要求非空即 builtin 智能体；也可添加反向规则排除某类文件；钉钉从下拉栏选设置页里的渠道；生效时间可填开始/结束和星期，都留空则一直生效），或用自然语言添加新规则（只追加，不改已有规则；调用 LLM；也可粘贴 YAML/JSON，不经模型）。打开规则编辑后，可在表单顶部用自然语言由 AI 填入该条，确认后再保存。已运行则热更新，未运行则写入配置等下次 start。选了钉钉且填写了任务要求时，智能体完成后立刻把最后一轮回复推到该群。
 - 智能体：只列出填写了任务要求的规则；点进某条后，该规则的执行过程以 SSE 实时日志按轮次展示（system / user / agent / 工具命令，可展开）。工具日志仍写入 `home/agent-logs/<job_id>.jsonl`
 - 设置：`/settings` 填写 `base_url` / `model` / API Key，并选择协议 `wire_api`（`chat` 走 `/chat/completions`，`responses` 走 `/responses`，`anthropic` 走 `/messages`）。接口地址旁可打开常见端点列表（国产 Chat Completions、Anthropic Messages、Responses）一键填入。钉钉群机器人（名称、Webhook、SEC），以及事件入账去抖、行级快照等待和最大文件。Key 和钉钉凭证写入 `%LOCALAPPDATA%/filewatch/settings.json`（或 `$FILEWATCH_HOME`），不要放进被监听目录。也可用环境变量 `FILEWATCH_LLM_API_KEY`、`FILEWATCH_LLM_BASE_URL`、`FILEWATCH_LLM_MODEL`、`FILEWATCH_LLM_WIRE_API`。规则里不要再写钉钉 webhook
 
@@ -252,6 +252,7 @@ rules:
             本次触发：{{type}} {{path}}
           timeout_seconds: 600
           max_steps: 24
+          dingtalk: true                            # 完成后立刻推送最后一轮回复；省略则沿用上面 notify 的渠道
   - name: skip-logs
     exclude: true
     when:
@@ -279,7 +280,7 @@ when:
 `then` 动作：
 
 - `notify`：一律写入 `jobs` 流；可选 `webhook` 立即 POST JSON（不是钉钉）。钉钉用 `dingtalk: true` 或 `{channel: id}`，凭证在设置 `dingtalk.channels`，命中后按分钟汇总（无变化不发送）。规则内 webhook/secret 仅兼容旧配置。
-- `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工作流写入 `home/agent-logs/<job_id>.jsonl`，网页「智能体」页用 SSE 实时展示。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。
+- `agent.runner: builtin`（默认）：任务要求写在 `prompt`；调用设置页 LLM（`FILEWATCH_HOME/settings.json`），内置工具 Read / Glob / Grep / Write / Bash / PowerShell。工作流写入 `home/agent-logs/<job_id>.jsonl`，网页「智能体」页用 SSE 实时展示。可选 `max_steps`（默认 24）、`model`（覆盖设置中的模型）。规则选了钉钉渠道时（`agent.dingtalk` 或同规则的 `notify.dingtalk`），任务成功完成后立刻推送智能体最后一轮回复（不按分钟汇总）；推送失败不影响任务本身的 `ok` 状态。
 - `agent.runner: command`：执行 argv。prompt 走 stdin，同时设置 `FILEWATCH_PROMPT` 和 `FILEWATCH_EVENT_JSON`。
 - `agent.runner: cursor_sdk`：需要 `cursor-sdk` 和 `CURSOR_API_KEY`。会启动**一次新的**智能体 run，不会唤醒当前对话。
 

@@ -127,6 +127,8 @@ def test_agent_loop_mock_tools(tmp_path: Path) -> None:
     assert result.status == "ok"
     assert result.steps == 2
     assert result.tool_calls == 1
+    assert result.last_reply == "已重写 a.md"
+    assert result.output == "已重写 a.md"
     assert (tmp_path / "a.md").read_text(encoding="utf-8") == "new"
     assert (tmp_path / "logs" / "job_loop.jsonl").exists()
     lines = (tmp_path / "logs" / "job_loop.jsonl").read_text(encoding="utf-8").strip().splitlines()

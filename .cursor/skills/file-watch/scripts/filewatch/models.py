@@ -136,6 +136,7 @@ class AgentAction:
     timeout_seconds: float = 600.0
     model: str | None = None
     max_steps: int = 24
+    dingtalk: DingTalkRef | None = None
 
 
 Action = NotifyAction | AgentAction

@@ -21,8 +21,9 @@ FIELD_CONSTRAINTS = """- when.types 只能是 created / modified / deleted / mov
 - 用户说不监听/排除/忽略某类文件（反向规则）时：exclude=true，then 必须是 []，when.glob 或 regex 必填（如 ["**/*.log"]）。未指定事件类型时 types 用全部四种。不要写 notify/agent。默认仍监听全部文件，只有反向规则命中的路径才不入账。
 - 用户没说任务要求/启动智能体/处理文件时，正向规则 then 只含 notify
 - 用户提到钉钉/群机器人时，notify.dingtalk 设为 true（用设置页默认渠道）；指定了渠道名或 id 则写 {"channel":"id"}。不要把 webhook/secret 写进规则
-- 钉钉是按分钟汇总推送，不要改成即时 webhook
-- 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null}}
+- 文件变化的钉钉是按分钟汇总推送；若同时有 builtin 智能体，完成后会立刻把最后一轮回复推到同一渠道，不要改成即时 webhook
+- 用户说了要做什么（重写、处理、启动智能体、按格式改写等）时，then 追加 agent：{"agent":{"runner":"builtin","prompt":"完整任务要求（可用模板变量）","timeout_seconds":600,"max_steps":24,"command":null,"cwd":null,"model":null,"dingtalk":null}}
+- 用户同时要任务要求和钉钉时，agent.dingtalk 与 notify.dingtalk 用同一渠道引用（true 或 {"channel":"id"}）
 - agent.runner 默认 builtin（调用设置页 LLM）；高级用法才用 command（须 command 字符串数组）或 cursor_sdk
 - 模板变量只能用 {{path}} {{filename}} {{type}} {{watch_id}} {{ts}} {{old_path}} {{json}} {{rule}}
 - 正向规则未指定类型时用 created 和 modified；未指定文件种类时 glob 为 ["**/*"]，is_dir 为 false
