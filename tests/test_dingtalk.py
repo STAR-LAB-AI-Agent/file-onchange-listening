@@ -58,6 +58,21 @@ def test_format_and_coalesce() -> None:
     assert "modified: b.txt" in text
 
 
+def test_format_markdown_truncates_long_payload() -> None:
+    items = [
+        {
+            "title": "文件有变化",
+            "message": ("很长的路径/" * 80) + f"file-{index}.md",
+            "rule": "docs",
+            "event": {"type": "created", "path": f"file-{index}.md"},
+        }
+        for index in range(80)
+    ]
+    _, text = format_markdown(items)
+    assert "其余条目已省略" in text
+    assert len(text.encode("utf-8")) <= 18000
+
+
 def test_parse_dingtalk_and_roundtrip() -> None:
     config = parse_config_dict(
         {

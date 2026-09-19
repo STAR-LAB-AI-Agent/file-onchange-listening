@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from filewatch.linediff import load_line_changes_map, merge_line_changes
 from filewatch.paths import watcher_dir, watchers_root
 
 
@@ -42,6 +43,8 @@ class WatchStore:
         self.reload_flag_path = self.dir / "reload.flag"
         self.pending_path = self.dir / "pending.json"
         self.reload_status_path = self.dir / "reload.status.json"
+        self.line_changes_path = self.dir / "line_changes.json"
+        self.text_snapshots_dir = self.dir / "text-snapshots"
 
     def write_json(self, path: Path, payload: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +82,14 @@ class WatchStore:
             os.fsync(handle.fileno())
         return payload
 
+    def _merge_event_records(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not records:
+            return records
+        sidecar = load_line_changes_map(self.line_changes_path)
+        if not sidecar:
+            return records
+        return [merge_line_changes(record, sidecar) for record in records]
+
     def read_since(self, stream: str, offset: int, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
         path = self.stream_path(stream)
         if not path.exists():
@@ -101,6 +112,8 @@ class WatchStore:
                 records.append(json.loads(stripped))
                 if limit is not None and len(records) >= limit:
                     break
+            if stream == "events":
+                records = self._merge_event_records(records)
             if limit is not None and len(records) >= limit:
                 return records, consumed
             return records, consumed
@@ -130,6 +143,8 @@ class WatchStore:
                 records.append(json.loads(stripped))
             if limit is not None and len(records) > limit:
                 records = records[-limit:]
+            if stream == "events":
+                records = self._merge_event_records(records)
             return records, consumed
 
     def query_records(
@@ -177,6 +192,8 @@ class WatchStore:
                         if end_dt and ts > end_dt:
                             continue
                     matched.append(record)
+        if stream == "events":
+            matched = self._merge_event_records(matched)
         matched.reverse()
         total = len(matched)
         pages = max(1, math.ceil(total / page_size)) if total else 1

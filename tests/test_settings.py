@@ -147,3 +147,30 @@ def test_save_dingtalk_frontend_payload_keeps_channel(tmp_path: Path, monkeypatc
     assert again["ok"] is True
     assert len(again["dingtalk"]["channels"]) == 1
     assert load_dingtalk_channels()[0].secret == "SECfromui"
+
+
+def test_resolve_dingtalk_missing_channel(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    try:
+        resolve_dingtalk(DingTalkRef(channel="work"))
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "钉钉" in str(exc)
+    save_settings(
+        {
+            "dingtalk": {
+                "channels": [
+                    {
+                        "id": "bot",
+                        "name": "默认",
+                        "webhook": "https://oapi.dingtalk.com/robot/send?access_token=tok",
+                    }
+                ]
+            }
+        }
+    )
+    try:
+        resolve_dingtalk(DingTalkRef(channel="missing"))
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "找不到钉钉渠道" in str(exc)

@@ -5,6 +5,8 @@ watch:
   path: ./inbox
   recursive: true
   debounce_ms: 400
+  # 可读文本行级 diff：该文件再安静这么久才结算一次（默认 2 秒）
+  line_diff_quiet_ms: 2000
   ignore:
     - "**/.git/**"
     - "**/__pycache__/**"

@@ -435,3 +435,109 @@ def test_web_settings_and_llm_from_text(tmp_path: Path, monkeypatch) -> None:
         httpd.shutdown()
         httpd.server_close()
 
+
+def test_web_health_and_invalid_requests(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    monkeypatch.setattr(
+        "filewatch.web.test_llm_connection",
+        lambda: {"ok": False, "error": "llm_not_configured", "message": "请先填写 API Key"},
+    )
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _get(f"http://127.0.0.1:{port}/api/health")
+        assert status == 200
+        assert payload["ok"] is True
+        status, payload = _post(f"http://127.0.0.1:{port}/api/settings/test", {})
+        assert status == 400
+        assert payload["error"] == "llm_not_configured"
+        status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/start", {})
+        assert status == 400
+        assert payload["error"] == "bad_request"
+        status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/start", {"path": str(tmp_path / "missing")})
+        assert status == 404
+        status, payload = _get(f"http://127.0.0.1:{port}/api/watchers/not.valid/events")
+        assert status == 400
+        assert payload["error"] == "bad_id"
+        status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/inbox/rules/from-text", {})
+        assert status == 400
+        assert payload["error"] == "bad_request"
+        status, payload = _post(f"http://127.0.0.1:{port}/api/watchers/nope/rules", {"rules": []})
+        assert status == 404
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/settings",
+            data=b"[1]",
+            method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(request, timeout=5)
+            raise AssertionError("expected HTTPError")
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8"))
+            assert exc.code == 400
+            assert body["error"] == "bad_json"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_web_save_rules_reloads_running(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import threading
+
+    from filewatch.runtime import WatchRuntime
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("FILEWATCH_HOME", str(home))
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = _seed_watcher("inbox", inbox, {"id": "evt_inbox", "type": "created", "path": str(inbox / "a.txt")})
+    config = parse_config_dict(
+        {
+            "name": "inbox",
+            "watch": {"path": str(inbox), "debounce_ms": 1},
+            "rules": [],
+        }
+    )
+    runtime = WatchRuntime(config, store)
+    store.write_pid(os.getpid())
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.is_set():
+            runtime._poll_control()
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    httpd = serve_http("127.0.0.1", 0)
+    try:
+        port = httpd.server_address[1]
+        status, payload = _post(
+            f"http://127.0.0.1:{port}/api/watchers/inbox/rules",
+            {
+                "rules": [
+                    {
+                        "name": "hot",
+                        "when": {"types": ["created"], "glob": ["**/*.md"], "is_dir": False},
+                        "then": [{"notify": {"title": "t", "message": "{{filename}}"}}],
+                    }
+                ]
+            },
+        )
+        assert status == 200, payload
+        assert payload["reloaded"] is True
+        assert any(rule.name == "hot" for rule in runtime.config.rules)
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
+        httpd.shutdown()
+        httpd.server_close()
+

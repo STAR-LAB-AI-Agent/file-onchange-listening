@@ -179,3 +179,65 @@ def test_agent_loop_max_steps(tmp_path: Path) -> None:
     assert result.status == "error"
     assert result.error == "max_steps"
     assert result.steps == 2
+
+
+def test_agent_loop_timeout(tmp_path: Path, monkeypatch) -> None:
+    ticks = {"n": 0}
+
+    def fake_monotonic() -> float:
+        ticks["n"] += 1
+        return 1000.0 if ticks["n"] == 1 else 1002.0
+
+    monkeypatch.setattr("filewatch.agent.loop.time.monotonic", fake_monotonic)
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("chat should not run after timeout")
+
+    result = run_builtin_agent(
+        prompt="timeout",
+        event=_event(),
+        workspace=tmp_path,
+        job_id="job_timeout",
+        log_dir=tmp_path / "logs",
+        timeout_seconds=1,
+        chat=should_not_run,
+    )
+    assert result.status == "error"
+    assert result.error == "timeout"
+
+
+def test_agent_loop_unknown_tool_then_finishes(tmp_path: Path) -> None:
+    script: list[dict] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "NoSuchTool", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "assistant", "content": "已结束"},
+    ]
+    calls = {"n": 0}
+
+    def fake_chat(messages, **kwargs):
+        idx = calls["n"]
+        calls["n"] += 1
+        return script[idx]
+
+    result = run_builtin_agent(
+        prompt="use missing tool",
+        event=_event(),
+        workspace=tmp_path,
+        job_id="job_unknown",
+        log_dir=tmp_path / "logs",
+        chat=fake_chat,
+        registry=build_default_registry(),
+    )
+    assert result.status == "ok"
+    assert result.tool_calls == 1
+    log_text = (tmp_path / "logs" / "job_unknown.jsonl").read_text(encoding="utf-8")
+    assert "unknown_tool" in log_text or "NoSuchTool" in log_text

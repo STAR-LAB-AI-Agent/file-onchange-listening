@@ -72,6 +72,38 @@ def test_apply_reload_rejects_path_change(tmp_path: Path) -> None:
         runtime.actions.close(wait=False)
 
 
+def test_apply_reload_rejects_recursive_change(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("demo", root=tmp_path / "state")
+    runtime = WatchRuntime(parse_config_dict(_config(inbox, "**/*")), store)
+    try:
+        changed = _config(inbox, "**/*")
+        changed["watch"]["recursive"] = False
+        with pytest.raises(ReloadError) as caught:
+            runtime.apply_reload(parse_config_dict(changed))
+        assert caught.value.error == "needs_restart"
+    finally:
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
+
+
+def test_apply_reload_warns_on_max_parallel(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    store = WatchStore("demo", root=tmp_path / "state")
+    runtime = WatchRuntime(parse_config_dict(_config(inbox, "**/*")), store)
+    try:
+        next_cfg = _config(inbox, "**/*.md")
+        next_cfg["max_parallel_jobs"] = 3
+        result = runtime.apply_reload(parse_config_dict(next_cfg))
+        assert any("max_parallel_jobs" in item for item in result["warnings"])
+        assert runtime.config.max_parallel_jobs == 1
+    finally:
+        runtime.debouncer.close()
+        runtime.actions.close(wait=False)
+
+
 def test_validate_accepts_and_rejects(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()

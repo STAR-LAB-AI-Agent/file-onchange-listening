@@ -74,6 +74,150 @@ def test_cooldown(tmp_path: Path) -> None:
     assert engine.matches(event) == []
 
 
+def test_cooldown_expires(tmp_path: Path, monkeypatch) -> None:
+    clock = {"now": 100.0}
+    monkeypatch.setattr("filewatch.rules.time.monotonic", lambda: clock["now"])
+    engine = _engine(tmp_path, {"types": ["created"], "glob": "**/*", "cooldown_seconds": 60})
+    event = _event(tmp_path)
+    assert engine.matches(event)
+    clock["now"] = 150.0
+    assert engine.matches(event) == []
+    clock["now"] = 161.0
+    assert [rule.name for rule in engine.matches(event)] == ["any"]
+
+
+def test_regex_min_size_enabled_and_is_dir(tmp_path: Path) -> None:
+    small = tmp_path / "notes-1.md"
+    large = tmp_path / "notes-2.md"
+    other = tmp_path / "skip.md"
+    small.write_text("x", encoding="utf-8")
+    large.write_text("hello world", encoding="utf-8")
+    other.write_text("hello world", encoding="utf-8")
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {
+                    "name": "sized",
+                    "when": {"types": ["created"], "regex": r"notes-\d+\.md$", "min_size_bytes": 8, "is_dir": False},
+                    "then": [{"notify": {}}],
+                },
+                {
+                    "name": "off",
+                    "enabled": False,
+                    "when": {"types": ["created"], "glob": "**/*"},
+                    "then": [{"notify": {}}],
+                },
+                {
+                    "name": "dirs",
+                    "when": {"types": ["created"], "is_dir": True},
+                    "then": [{"notify": {}}],
+                },
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    file_event = FileEvent(
+        id="e1",
+        ts="2026-01-01T00:00:00Z",
+        watch_id="demo",
+        type="created",
+        path=str(large),
+        is_dir=False,
+    )
+    assert [rule.name for rule in engine.matches(file_event)] == ["sized"]
+    small_event = FileEvent(**{**file_event.to_dict(), "path": str(small)})
+    assert engine.matches(small_event) == []
+    skip_event = FileEvent(**{**file_event.to_dict(), "path": str(other)})
+    assert engine.matches(skip_event) == []
+    dir_event = FileEvent(
+        id="e2",
+        ts="2026-01-01T00:00:00Z",
+        watch_id="demo",
+        type="created",
+        path=str(tmp_path / "folder"),
+        is_dir=True,
+    )
+    assert [rule.name for rule in engine.matches(dir_event)] == ["dirs"]
+    missing = FileEvent(**{**file_event.to_dict(), "path": str(tmp_path / "gone.md"), "type": "deleted"})
+    sized_only = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {
+                    "name": "sized",
+                    "when": {"types": ["deleted"], "glob": "**/*", "min_size_bytes": 1},
+                    "then": [{"notify": {}}],
+                }
+            ],
+        }
+    )
+    assert RuleEngine(tmp_path, sized_only.rules).matches(missing) == []
+
+
+def test_multiple_rules_can_hit_one_event(tmp_path: Path) -> None:
+    config = parse_config_dict(
+        {
+            "name": "demo",
+            "watch": {"path": str(tmp_path)},
+            "rules": [
+                {"name": "any", "when": {"types": ["created"], "glob": "**/*"}, "then": [{"notify": {}}]},
+                {"name": "md", "when": {"types": ["created"], "glob": "**/*.md"}, "then": [{"notify": {}}]},
+            ],
+        }
+    )
+    engine = RuleEngine(tmp_path, config.rules)
+    assert [rule.name for rule in engine.matches(_event(tmp_path, "a.md"))] == ["any", "md"]
+
+
+def test_duplicate_name_empty_then_and_bad_filters() -> None:
+    with pytest.raises(ConfigError, match="不能重复"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [
+                    {"name": "a", "when": {"types": ["created"]}, "then": [{"notify": {}}]},
+                    {"name": "a", "when": {"types": ["deleted"]}, "then": [{"notify": {}}]},
+                ],
+            }
+        )
+    with pytest.raises(ConfigError, match="then"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [{"name": "a", "when": {"types": ["created"]}, "then": []}],
+            }
+        )
+    with pytest.raises(ConfigError, match="regex"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [{"name": "a", "when": {"types": ["created"], "regex": "["}, "then": [{"notify": {}}]}],
+            }
+        )
+    with pytest.raises(ConfigError, match="空字符串"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [{"name": "a", "when": {"types": ["created"], "glob": [""]}, "then": [{"notify": {}}]}],
+            }
+        )
+    with pytest.raises(ConfigError, match="notify 或 agent"):
+        parse_config_dict(
+            {
+                "name": "demo",
+                "watch": {"path": "."},
+                "rules": [{"name": "a", "when": {"types": ["created"]}, "then": [{"notify": {}, "agent": {}}]}],
+            }
+        )
+
+
 def test_replace_rules_drops_removed_cooldown(tmp_path: Path) -> None:
     config = parse_config_dict(
         {

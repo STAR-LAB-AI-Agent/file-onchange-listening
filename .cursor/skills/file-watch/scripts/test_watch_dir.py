@@ -89,7 +89,7 @@ def run_probe(watch_path: Path, *, timeout: float, keep: bool) -> dict:
     config = parse_config_dict(
         {
             "name": "probe",
-            "watch": {"path": str(watch_path), "debounce_ms": 150, "recursive": True},
+            "watch": {"path": str(watch_path), "debounce_ms": 150, "line_diff_quiet_ms": 100, "recursive": True},
             "rules": [
                 {
                     "name": "markdown",
@@ -121,6 +121,28 @@ def run_probe(watch_path: Path, *, timeout: float, keep: bool) -> dict:
 
         files["txt"].write_text("hello world", encoding="utf-8")
         modified, cursor = _collect(store, "events", cursor, timeout)
+        line_ok = False
+        line_deadline = time.monotonic() + max(timeout, 2.0)
+        while time.monotonic() < line_deadline:
+            all_items, _ = store.read_since("events", 0)
+            for item in all_items:
+                if _name(item.get("path", "")) != files["txt"].name.lower():
+                    continue
+                if item.get("type") not in {"modified", "created"}:
+                    continue
+                lc = item.get("line_changes") or {}
+                if lc.get("kind") == "text" and (
+                    int(lc.get("added") or 0) >= 1 or int(lc.get("removed") or 0) >= 0
+                ):
+                    # Prefer a settled modified event with an actual content change.
+                    if item.get("type") == "modified" and int(lc.get("added") or 0) + int(
+                        lc.get("removed") or 0
+                    ) >= 1:
+                        line_ok = True
+                        break
+            if line_ok:
+                break
+            time.sleep(0.05)
 
         moved = watch_path / f"{PREFIX}notes.moved.md"
         files["md"].rename(moved)
@@ -140,6 +162,7 @@ def run_probe(watch_path: Path, *, timeout: float, keep: bool) -> dict:
             {"name": "忽略 tmp", "ok": not _has_file(events, files["tmp"].name)},
             {"name": "忽略 .git", "ok": not _has_file(events, "head")},
             {"name": "修改 txt", "ok": _has_file(modified, files["txt"].name, {"modified", "created"})},
+            {"name": "txt 行级变化", "ok": line_ok},
             {"name": "移动 md", "ok": _has_file(renamed, moved.name, {"moved", "created", "deleted"})},
             {"name": "删除 json", "ok": _has_file(deleted, files["json"].name, {"deleted", "modified"})},
             {

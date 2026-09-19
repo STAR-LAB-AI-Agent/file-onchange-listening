@@ -129,3 +129,36 @@ def test_powershell_sandbox_via_tool(tmp_path: Path) -> None:
     denied = ps.execute({"command": f'Remove-Item -Recurse -Force "{tmp_path}"'}, ctx)
     assert not denied.ok
     assert denied.error == "sandbox_denied"
+
+
+def test_read_missing_and_grep_bad_regex(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    ctx = _ctx(tmp_path)
+    read = registry.get("Read")
+    assert read is not None
+    missing = read.execute({"path": "nope.txt"}, ctx)
+    assert not missing.ok
+    assert missing.error == "not_found"
+
+    grep = registry.get("Grep")
+    assert grep is not None
+    bad = grep.execute({"pattern": "["}, ctx)
+    assert not bad.ok
+    assert bad.error == "bad_regex"
+
+
+def test_bash_rejects_empty_command(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    ctx = _ctx(tmp_path)
+    bash = registry.get("Bash")
+    assert bash is not None
+    empty = bash.execute({"command": "  "}, ctx)
+    assert not empty.ok
+    assert empty.error == "bad_args"
+
+
+def test_unknown_tool_dispatch(tmp_path: Path) -> None:
+    registry = build_default_registry()
+    records = registry.dispatch([ToolCall(id="1", name="NoSuch", arguments={})], _ctx(tmp_path))
+    assert len(records) == 1
+    assert records[0].result.error == "unknown_tool"

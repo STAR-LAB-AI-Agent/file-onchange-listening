@@ -84,6 +84,7 @@ class Debouncer:
                     path=event.path,
                     old_path=item.event.old_path or event.old_path,
                     is_dir=event.is_dir,
+                    line_changes=event.line_changes,
                 )
         item.due = time.monotonic() + self.delay
 
@@ -97,6 +98,7 @@ class Debouncer:
             path=event.path,
             old_path=event.old_path,
             is_dir=event.is_dir,
+            line_changes=event.line_changes,
         )
 
     def _run(self) -> None:

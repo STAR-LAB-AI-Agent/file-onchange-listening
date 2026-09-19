@@ -30,6 +30,11 @@ def test_coalesce_moved() -> None:
     assert coalesce_types({"moved", "modified"}) == "moved"
 
 
+def test_coalesce_deleted_only() -> None:
+    assert coalesce_types({"deleted"}) == "deleted"
+    assert coalesce_types({"modified"}) == "modified"
+
+
 def test_per_path_debounce_flushes_after_quiet_period() -> None:
     seen: list[FileEvent] = []
     debouncer = Debouncer(80, seen.append)
@@ -74,3 +79,26 @@ def test_decode_watchdog_path_accepts_bytes() -> None:
     assert decode_watchdog_path(b"hello.txt") == "hello.txt"
     assert decode_watchdog_path("") == ""
     assert decode_watchdog_path(None) == ""
+
+
+def test_moved_keeps_old_path() -> None:
+    seen: list[FileEvent] = []
+    debouncer = Debouncer(0, seen.append)
+    try:
+        debouncer.push(
+            FileEvent(
+                id="evt_1",
+                ts="2026-01-01T00:00:00Z",
+                watch_id="demo",
+                type="moved",
+                path="b.txt",
+                old_path="a.txt",
+                is_dir=False,
+            )
+        )
+        assert len(seen) == 1
+        assert seen[0].type == "moved"
+        assert seen[0].path == "b.txt"
+        assert seen[0].old_path == "a.txt"
+    finally:
+        debouncer.close()

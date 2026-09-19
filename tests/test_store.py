@@ -80,3 +80,27 @@ def test_query_records_filters_time_and_type(tmp_path) -> None:
     )
     assert [item["id"] for item in result["items"]] == ["c"]
     assert result["total"] == 1
+
+
+def test_ack_cannot_move_backwards(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    store.append("jobs", {"id": "1"})
+    items, cursor, _ = store.wait("jobs", 0, timeout=0.1, limit=10)
+    assert items
+    store.ack("jobs", cursor)
+    try:
+        store.ack("jobs", 0)
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "backwards" in str(exc)
+
+
+def test_query_records_rejects_bad_time(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.ensure()
+    try:
+        store.query_records("events", ts_from="not-a-date")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert str(exc) == "ts_from"

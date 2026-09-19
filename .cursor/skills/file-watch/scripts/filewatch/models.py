@@ -19,9 +19,10 @@ class FileEvent:
     path: str
     old_path: str | None = None
     is_dir: bool = False
+    line_changes: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "ts": self.ts,
             "watch_id": self.watch_id,
@@ -30,9 +31,15 @@ class FileEvent:
             "old_path": self.old_path,
             "is_dir": self.is_dir,
         }
+        if self.line_changes is not None:
+            payload["line_changes"] = self.line_changes
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> FileEvent:
+        line_changes = data.get("line_changes")
+        if line_changes is not None and not isinstance(line_changes, dict):
+            line_changes = None
         return cls(
             id=str(data["id"]),
             ts=str(data["ts"]),
@@ -41,6 +48,7 @@ class FileEvent:
             path=str(data["path"]),
             old_path=data.get("old_path"),
             is_dir=bool(data.get("is_dir", False)),
+            line_changes=line_changes,
         )
 
 
@@ -155,6 +163,7 @@ class WatchSettings:
     path: str
     recursive: bool = True
     debounce_ms: int = 400
+    line_diff_quiet_ms: int = 2000
     ignore: tuple[str, ...] = DEFAULT_IGNORE
 
 

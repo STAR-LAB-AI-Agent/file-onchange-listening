@@ -37,6 +37,7 @@ watch:
   path: ./inbox
   recursive: true
   debounce_ms: 400
+  line_diff_quiet_ms: 2000
   ignore:
     - "**/.git/**"
     - "**/__pycache__/**"

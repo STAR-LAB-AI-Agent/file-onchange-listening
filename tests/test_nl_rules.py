@@ -202,3 +202,16 @@ def test_unique_name_when_appending() -> None:
     )
     assert result["rules"][0]["name"] != "created-md"
     assert result["rules"][0]["name"].startswith("created-md")
+
+
+def test_merge_replace_drops_existing() -> None:
+    existing = [{"name": "old", "when": {}, "then": [{"notify": {}}]}]
+    generated = [{"name": "new", "when": {"glob": ["**/*.md"]}, "then": [{"notify": {}}]}]
+    merged = merge_rules(existing, generated, "replace")
+    assert [item["name"] for item in merged] == ["new"]
+
+
+def test_llm_garbage_is_bad_config() -> None:
+    result = rules_from_text("新建 markdown", complete=lambda _s, _u: "抱歉，我不能输出 JSON")
+    assert result["ok"] is False
+    assert result["error"] == "bad_config"

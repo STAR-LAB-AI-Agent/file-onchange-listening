@@ -428,10 +428,17 @@ def parse_config_dict(raw: dict[str, Any], *, source: str | None = None) -> Conf
     if not path or not isinstance(path, str):
         raise ConfigError("watch.path 必填")
     ignore = _as_tuple(watch_raw.get("ignore"), field="watch.ignore")
+    debounce_ms = int(watch_raw.get("debounce_ms", 400))
+    line_diff_quiet_ms = int(watch_raw.get("line_diff_quiet_ms", 2000))
+    if debounce_ms < 0:
+        raise ConfigError("watch.debounce_ms 必须 >= 0")
+    if line_diff_quiet_ms < 0:
+        raise ConfigError("watch.line_diff_quiet_ms 必须 >= 0")
     settings = WatchSettings(
         path=path,
         recursive=bool(watch_raw.get("recursive", True)),
-        debounce_ms=int(watch_raw.get("debounce_ms", 400)),
+        debounce_ms=debounce_ms,
+        line_diff_quiet_ms=line_diff_quiet_ms,
         ignore=ignore or DEFAULT_IGNORE,
     )
     name = raw.get("name")
@@ -465,6 +472,7 @@ def _with_watch_path(config: Config, watch_path: Path) -> Config:
             path=str(watch_path),
             recursive=config.watch.recursive,
             debounce_ms=config.watch.debounce_ms,
+            line_diff_quiet_ms=config.watch.line_diff_quiet_ms,
             ignore=config.watch.ignore,
         ),
         rules=config.rules,
@@ -534,6 +542,7 @@ def summarize_config(config: Config) -> dict[str, Any]:
         "watch_path": config.watch.path,
         "recursive": config.watch.recursive,
         "debounce_ms": config.watch.debounce_ms,
+        "line_diff_quiet_ms": config.watch.line_diff_quiet_ms,
         "ignore": list(config.watch.ignore),
         "max_parallel_jobs": config.max_parallel_jobs,
         "rules": rules,
@@ -595,6 +604,7 @@ def config_to_dict(config: Config) -> dict[str, Any]:
             "path": config.watch.path,
             "recursive": config.watch.recursive,
             "debounce_ms": config.watch.debounce_ms,
+            "line_diff_quiet_ms": config.watch.line_diff_quiet_ms,
             "ignore": list(config.watch.ignore),
         },
         "rules": rules,

@@ -25,6 +25,7 @@ from watchdog.observers import Observer
 from filewatch.actions import ActionRunner
 from filewatch.config import ConfigError, config_to_dict, parse_config_dict, summarize_config
 from filewatch.debounce import Debouncer
+from filewatch.linediff import put_line_changes, settle_line_changes
 from filewatch.matching import path_is_ignored
 from filewatch.models import EVENT_TYPES, Config, FileEvent
 from filewatch.rules import RuleEngine
@@ -82,12 +83,16 @@ class WatchRuntime:
             suppress=self.suppress_path,
         )
         self.debouncer = Debouncer(config.watch.debounce_ms, self._on_coalesced)
+        self.line_diff_debouncer = Debouncer(config.watch.line_diff_quiet_ms, self._on_line_diff_quiet)
         self.observer = Observer()
         self._ignore_case = sys.platform == "win32"
         self._stop = threading.Event()
         self._config_lock = threading.Lock()
         self._suppress_until: dict[str, float] = {}
         self._suppress_lock = threading.Lock()
+        self._line_diff_lock = threading.Lock()
+        # path -> latest event waiting for line-diff settlement
+        self._pending_line_diff: dict[str, FileEvent] = {}
 
     def start(self) -> None:
         if not self.root.exists() or not self.root.is_dir():
@@ -120,6 +125,7 @@ class WatchRuntime:
             self.observer.stop()
             self.observer.join(timeout=5)
         self.debouncer.close()
+        self.line_diff_debouncer.close()
         self.actions.close(wait=False)
         if self.store.pid_path.exists():
             self.store.pid_path.unlink()
@@ -153,6 +159,7 @@ class WatchRuntime:
             old_parallel = self.config.max_parallel_jobs
             self.engine.replace_rules(config.rules)
             self.debouncer.set_delay_ms(config.watch.debounce_ms)
+            self.line_diff_debouncer.set_delay_ms(config.watch.line_diff_quiet_ms)
             self.config = Config(
                 name=self.config.name,
                 watch=config.watch,
@@ -302,13 +309,67 @@ class WatchRuntime:
         self.debouncer.push(event)
 
     def _on_coalesced(self, event: FileEvent) -> None:
-        self.store.append("events", event.to_dict())
-        log.info("event %s %s", event.type, event.path)
+        enriched = self._with_pending_line_changes(event)
+        self.store.append("events", enriched.to_dict())
+        log.info("event %s %s", enriched.type, enriched.path)
         with self._config_lock:
-            hits = self.engine.matches(event)
+            hits = self.engine.matches(enriched)
         for rule in hits:
-            log.info("rule hit %s -> %s", rule.name, event.path)
-            self.actions.submit(event, rule)
+            log.info("rule hit %s -> %s", rule.name, enriched.path)
+            self.actions.submit(enriched, rule)
+        self._schedule_line_diff(enriched)
+
+    def _with_pending_line_changes(self, event: FileEvent) -> FileEvent:
+        if event.is_dir:
+            return event
+        return FileEvent(
+            id=event.id,
+            ts=event.ts,
+            watch_id=event.watch_id,
+            type=event.type,
+            path=event.path,
+            old_path=event.old_path,
+            is_dir=event.is_dir,
+            line_changes={"kind": "pending"},
+        )
+
+    def _schedule_line_diff(self, event: FileEvent) -> None:
+        if event.is_dir:
+            return
+        with self._line_diff_lock:
+            self._pending_line_diff[event.path] = event
+        if event.type == "deleted":
+            # File is gone — settle immediately without the quiet window.
+            self._settle_line_diff(event)
+            with self._line_diff_lock:
+                self._pending_line_diff.pop(event.path, None)
+            return
+        self.line_diff_debouncer.push(event)
+
+    def _on_line_diff_quiet(self, event: FileEvent) -> None:
+        with self._line_diff_lock:
+            pending = self._pending_line_diff.get(event.path)
+            if pending is None:
+                return
+            # Only settle if this flush still refers to the latest event for the path.
+            if pending.id != event.id:
+                return
+            self._pending_line_diff.pop(event.path, None)
+        self._settle_line_diff(pending)
+
+    def _settle_line_diff(self, event: FileEvent) -> None:
+        self.store.ensure()
+        self.store.text_snapshots_dir.mkdir(parents=True, exist_ok=True)
+        payload = settle_line_changes(
+            self.store.text_snapshots_dir,
+            event_type=event.type,
+            path=event.path,
+            old_path=event.old_path,
+            is_dir=event.is_dir,
+        )
+        if payload is None:
+            return
+        put_line_changes(self.store.line_changes_path, event.id, payload)
 
 
 class _Handler(FileSystemEventHandler):
