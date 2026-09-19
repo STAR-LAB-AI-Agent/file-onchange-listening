@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon } from "lucide-react"
 
 import { TaskChrome } from "@/components/TaskChrome"
 import { Badge } from "@/components/ui/badge"
@@ -31,6 +31,7 @@ import {
   relPath,
   typeBadgeClass,
   type FileEvent,
+  type LineChanges,
   type WatcherInfo,
 } from "@/lib/api"
 
@@ -43,6 +44,12 @@ const FILTERS = [
 ]
 
 const PAGE_SIZE = 100
+const SKIP_REASON: Record<string, string> = {
+  binary: "二进制，无行级变化",
+  too_large: "文件过大，未做行级对比",
+  unreadable: "无法读取，未做行级对比",
+  no_baseline: "尚无基线，下次修改起计入行级变化",
+}
 
 function toFromIso(local: string) {
   return local ? `${local}:00+08:00` : ""
@@ -50,6 +57,56 @@ function toFromIso(local: string) {
 
 function toToIso(local: string) {
   return local ? `${local}:59.999+08:00` : ""
+}
+
+function lineSummary(lc: LineChanges | null | undefined) {
+  if (!lc) return null
+  if (lc.kind === "pending") return { label: "行级结算中…", expandable: false }
+  if (lc.kind === "skipped") {
+    return {
+      label: SKIP_REASON[lc.reason || ""] || `已跳过（${lc.reason || "unknown"}）`,
+      expandable: false,
+    }
+  }
+  if (lc.kind === "text") {
+    const added = lc.added ?? 0
+    const removed = lc.removed ?? 0
+    if (added === 0 && removed === 0) {
+      return { label: "内容未变", expandable: false }
+    }
+    const trunc = lc.truncated ? "（已截断）" : ""
+    return {
+      label: `+${added} / −${removed}${trunc}`,
+      expandable: Boolean(lc.changes && lc.changes.length),
+    }
+  }
+  return null
+}
+
+function LineDiffPanel({ lc }: { lc: LineChanges }) {
+  const rows = lc.changes || []
+  if (!rows.length) return null
+  return (
+    <div className="mt-2 max-h-48 overflow-auto rounded-md border bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-5">
+      {rows.map((row, index) => {
+        const add = row.op === "add"
+        return (
+          <div
+            key={`${row.op}-${row.line}-${index}`}
+            className={
+              add
+                ? "whitespace-pre-wrap break-all text-emerald-700 dark:text-emerald-400"
+                : "whitespace-pre-wrap break-all text-rose-700 dark:text-rose-400"
+            }
+          >
+            <span className="mr-2 inline-block w-10 text-right text-muted-foreground">{row.line}</span>
+            <span className="mr-1">{add ? "+" : "−"}</span>
+            {row.text ?? ""}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export function TaskDetail({ watchId }: { watchId: string }) {
@@ -64,6 +121,7 @@ export function TaskDetail({ watchId }: { watchId: string }) {
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const cursorRef = useRef(0)
 
   const loadPage = useCallback(async () => {
@@ -107,7 +165,8 @@ export function TaskDetail({ watchId }: { watchId: string }) {
         if (cancelled) return
         if (live.cursor) cursorRef.current = live.cursor
         setInfo(live)
-        if (live.items && live.items.length && page === 1) {
+        // Refresh page 1 so settled line_changes (sidecar) appear without a new event.
+        if (page === 1 || (live.items && live.items.length)) {
           const data = await loadPage()
           if (!cancelled) applyPage(data)
         }
@@ -258,12 +317,15 @@ export function TaskDetail({ watchId }: { watchId: string }) {
                 <TableBody>
                   {events.map((item, index) => {
                     const type = item.type || ""
+                    const eventKey = item.id || `${item.ts}-${item.path}-${index}`
+                    const summary = lineSummary(item.line_changes)
+                    const open = Boolean(expanded[eventKey])
                     return (
-                      <TableRow key={item.id || `${item.ts}-${item.path}-${index}`}>
-                        <TableCell className="font-mono text-xs text-muted-foreground">
+                      <TableRow key={eventKey}>
+                        <TableCell className="align-top font-mono text-xs text-muted-foreground">
                           {formatEventTime(item.ts)}
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="align-top">
                           <Badge variant="outline" className={typeBadgeClass(type)}>
                             {TYPE_LABEL[type] || type}
                           </Badge>
@@ -274,6 +336,40 @@ export function TaskDetail({ watchId }: { watchId: string }) {
                             <div className="text-muted-foreground">从 {relPath(item.old_path, watchPath)}</div>
                           ) : null}
                           {item.is_dir ? <div className="text-muted-foreground">目录</div> : null}
+                          {summary ? (
+                            <div className="mt-1">
+                              {summary.expandable ? (
+                                <button
+                                  type="button"
+                                  className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+                                  onClick={() =>
+                                    setExpanded((current) => ({
+                                      ...current,
+                                      [eventKey]: !current[eventKey],
+                                    }))
+                                  }
+                                >
+                                  <ChevronDownIcon
+                                    className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+                                  />
+                                  <span
+                                    className={
+                                      item.line_changes?.kind === "text"
+                                        ? "text-emerald-700 dark:text-emerald-400"
+                                        : undefined
+                                    }
+                                  >
+                                    {summary.label}
+                                  </span>
+                                </button>
+                              ) : (
+                                <span className="text-[11px] text-muted-foreground">{summary.label}</span>
+                              )}
+                              {open && item.line_changes?.kind === "text" ? (
+                                <LineDiffPanel lc={item.line_changes} />
+                              ) : null}
+                            </div>
+                          ) : null}
                         </TableCell>
                       </TableRow>
                     )

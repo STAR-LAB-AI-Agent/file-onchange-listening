@@ -1,3 +1,19 @@
+export type LineChangeRow = {
+  op: "add" | "del" | string
+  line: number
+  text?: string
+}
+
+export type LineChanges = {
+  kind?: "text" | "skipped" | "pending" | string
+  encoding?: string
+  added?: number
+  removed?: number
+  truncated?: boolean
+  reason?: string
+  changes?: LineChangeRow[]
+}
+
 export type FileEvent = {
   id?: string
   ts?: string
@@ -5,6 +21,7 @@ export type FileEvent = {
   path?: string
   old_path?: string
   is_dir?: boolean
+  line_changes?: LineChanges | null
 }
 
 export type DingTalkAction = {
