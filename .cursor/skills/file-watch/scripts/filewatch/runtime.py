@@ -101,11 +101,14 @@ class WatchRuntime:
         self._pending_line_diff: dict[str, FileEvent] = {}
         self._fp_lock = threading.Lock()
         self._content_fp: dict[str, str] = {}
+        self._log_day = None
 
     def start(self) -> None:
         if not self.root.exists() or not self.root.is_dir():
             raise FileNotFoundError(f"watch path is not a directory: {self.root}")
         self.store.ensure()
+        self.store.prune_rotated()
+        self._log_day = self.store._today()
         self.store.clear_stop()
         self.store.clear_reload()
         self.store.config_path.write_text(
@@ -154,6 +157,10 @@ class WatchRuntime:
             return False
         if self.store.reload_requested():
             self._handle_reload()
+        today = self.store._today()
+        if self._log_day != today:
+            self._log_day = today
+            self.store.prune_rotated()
         return True
 
     def apply_reload(self, config: Config) -> dict:

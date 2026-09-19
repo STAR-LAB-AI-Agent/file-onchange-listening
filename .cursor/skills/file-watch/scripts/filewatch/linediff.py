@@ -310,6 +310,19 @@ def save_line_changes_map(path: Path, data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def drop_line_changes(path: Path, event_ids: set[str]) -> None:
+    if not event_ids or not path.exists():
+        return
+    data = load_line_changes_map(path)
+    changed = False
+    for event_id in event_ids:
+        if event_id in data:
+            data.pop(event_id, None)
+            changed = True
+    if changed:
+        save_line_changes_map(path, data)
+
+
 def put_line_changes(path: Path, event_id: str, payload: dict[str, Any]) -> None:
     data = load_line_changes_map(path)
     data[event_id] = payload

@@ -9,12 +9,29 @@ from pathlib import Path
 from typing import Any
 
 from filewatch.linediff import (
+    drop_line_changes,
     drop_superseded_pending_modified,
     is_noop_text_modified,
     load_line_changes_map,
     merge_line_changes,
 )
 from filewatch.paths import watcher_dir, watchers_root
+from filewatch.rotate import (
+    CURSOR_SPAN,
+    daemon_file,
+    decode_cursor,
+    encode_cursor,
+    keep_days,
+    list_stream_files,
+    local_now,
+    migrate_legacy_daemon,
+    migrate_legacy_stream,
+    prune_agent_logs,
+    prune_dated_files,
+    read_log_tail as read_rotated_log_tail,
+    remap_legacy_cursor,
+    stream_file,
+)
 
 
 def parse_event_ts(value: object) -> datetime | None:
@@ -52,14 +69,12 @@ def record_matches_path_query(record: dict[str, Any], query: str | None) -> bool
 
 
 class WatchStore:
-    def __init__(self, watch_id: str, root: Path | None = None) -> None:
+    def __init__(self, watch_id: str, root: Path | None = None, *, clock=None) -> None:
         self.watch_id = watch_id
         self.dir = (root / watch_id) if root is not None else watcher_dir(watch_id)
-        self.events_path = self.dir / "events.jsonl"
-        self.jobs_path = self.dir / "jobs.jsonl"
+        self._clock = clock
         self.cursors_path = self.dir / "cursors.json"
         self.pid_path = self.dir / "daemon.pid"
-        self.log_path = self.dir / "daemon.log"
         self.stop_path = self.dir / "stop.flag"
         self.config_path = self.dir / "config.json"
         self.reload_flag_path = self.dir / "reload.flag"
@@ -67,6 +82,24 @@ class WatchStore:
         self.reload_status_path = self.dir / "reload.status.json"
         self.line_changes_path = self.dir / "line_changes.json"
         self.text_snapshots_dir = self.dir / "text-snapshots"
+
+    def _now(self) -> datetime:
+        return local_now(self._clock)
+
+    def _today(self):
+        return self._now().date()
+
+    @property
+    def events_path(self) -> Path:
+        return stream_file(self.dir, "events", self._today())
+
+    @property
+    def jobs_path(self) -> Path:
+        return stream_file(self.dir, "jobs", self._today())
+
+    @property
+    def log_path(self) -> Path:
+        return daemon_file(self.dir, self._today())
 
     def write_json(self, path: Path, payload: dict[str, Any]) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -82,10 +115,39 @@ class WatchStore:
 
     def ensure(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
+        migrate_legacy_stream(self.dir, "events")
+        migrate_legacy_stream(self.dir, "jobs")
+        migrate_legacy_daemon(self.dir)
+        self._upgrade_cursors()
         self.events_path.touch(exist_ok=True)
         self.jobs_path.touch(exist_ok=True)
         if not self.cursors_path.exists():
             self.write_cursors({"events": 0, "jobs": 0})
+
+    def _upgrade_cursors(self) -> None:
+        if not self.cursors_path.exists():
+            return
+        try:
+            data = json.loads(self.cursors_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        changed = False
+        upgraded: dict[str, int] = {}
+        for stream in ("events", "jobs"):
+            raw = data.get(stream, 0)
+            try:
+                value = int(raw or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if 0 < value < CURSOR_SPAN:
+                upgraded[stream] = remap_legacy_cursor(self.dir, stream, value)
+                changed = True
+            else:
+                upgraded[stream] = value
+        if changed:
+            self.write_cursors(upgraded)
 
     def stream_path(self, stream: str) -> Path:
         if stream == "events":
@@ -93,6 +155,25 @@ class WatchStore:
         if stream == "jobs":
             return self.jobs_path
         raise ValueError(f"unknown stream: {stream}")
+
+    def has_records(self, stream: str) -> bool:
+        for _day, path in list_stream_files(self.dir, stream):
+            try:
+                if path.stat().st_size > 0:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def prune_rotated(self) -> None:
+        days = keep_days()
+        dropped = prune_dated_files(self.dir, keep=days, today=self._today())
+        if dropped:
+            drop_line_changes(self.line_changes_path, dropped)
+        prune_agent_logs(self.dir / "agent-logs", keep=days, now=self._now())
+
+    def read_log_tail(self, size: int = 2000) -> str:
+        return read_rotated_log_tail(self.dir, size)
 
     def append(self, stream: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.ensure()
@@ -112,16 +193,23 @@ class WatchStore:
             return records
         return [merge_line_changes(record, sidecar) for record in records]
 
-    def read_since(self, stream: str, offset: int, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
-        path = self.stream_path(stream)
+    def _read_file_since(
+        self,
+        path: Path,
+        offset: int,
+        limit: int | None,
+        *,
+        skip_partial: bool = False,
+    ) -> tuple[list[dict[str, Any]], int]:
         if not path.exists():
-            return [], 0
+            return [], max(0, int(offset))
         records: list[dict[str, Any]] = []
         with path.open("r", encoding="utf-8") as handle:
             handle.seek(max(offset, 0))
+            if skip_partial and offset > 0:
+                handle.readline()
             consumed = handle.tell()
             while True:
-                pos = handle.tell()
                 line = handle.readline()
                 if line == "":
                     break
@@ -134,40 +222,67 @@ class WatchStore:
                 records.append(json.loads(stripped))
                 if limit is not None and len(records) >= limit:
                     break
-            if stream == "events":
-                records = self._merge_event_records(records)
+        return records, consumed
+
+    def _end_cursor(self, stream: str) -> int:
+        files = list_stream_files(self.dir, stream)
+        if not files:
+            return 0
+        day, path = files[-1]
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return encode_cursor(day, size)
+
+    def read_since(self, stream: str, offset: int, limit: int | None = None) -> tuple[list[dict[str, Any]], int]:
+        files = list_stream_files(self.dir, stream)
+        if not files:
+            return [], max(0, int(offset or 0))
+        start_day, start_off = decode_cursor(offset)
+        records: list[dict[str, Any]] = []
+        consumed = encode_cursor(files[0][0], 0)
+        for day, path in files:
+            if day < start_day:
+                continue
+            pos = start_off if day == start_day else 0
+            remaining = None if limit is None else max(0, limit - len(records))
+            if remaining == 0:
+                break
+            chunk, end_pos = self._read_file_since(path, pos, remaining)
+            records.extend(chunk)
+            consumed = encode_cursor(day, end_pos)
             if limit is not None and len(records) >= limit:
-                return records, consumed
-            return records, consumed
+                break
+        if stream == "events":
+            records = self._merge_event_records(records)
+        return records, consumed
 
     def read_tail(self, stream: str, limit: int = 200, max_bytes: int = 262144) -> tuple[list[dict[str, Any]], int]:
-        path = self.stream_path(stream)
-        if not path.exists():
+        files = list_stream_files(self.dir, stream)
+        if not files:
             return [], 0
-        size = path.stat().st_size
-        with path.open("r", encoding="utf-8") as handle:
-            start = max(0, size - max(max_bytes, 1))
-            handle.seek(start)
-            if start > 0:
-                handle.readline()
-            records: list[dict[str, Any]] = []
-            consumed = handle.tell()
-            while True:
-                line = handle.readline()
-                if line == "":
-                    break
-                if not line.endswith("\n"):
-                    break
-                consumed = handle.tell()
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                records.append(json.loads(stripped))
-            if limit is not None and len(records) > limit:
-                records = records[-limit:]
-            if stream == "events":
-                records = self._merge_event_records(records)
-            return records, consumed
+        budget = max(max_bytes, 1)
+        collected: list[dict[str, Any]] = []
+        for day, path in reversed(files):
+            if budget <= 0:
+                break
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            start = max(0, size - budget)
+            chunk, _end = self._read_file_since(path, start, None, skip_partial=start > 0)
+            collected = chunk + collected
+            budget -= min(size, budget)
+            if limit is not None and len(collected) >= limit:
+                collected = collected[-limit:]
+                break
+        if limit is not None and len(collected) > limit:
+            collected = collected[-limit:]
+        if stream == "events":
+            collected = self._merge_event_records(collected)
+        return collected, self._end_cursor(stream)
 
     def query_records(
         self,
@@ -189,9 +304,7 @@ class WatchStore:
         if ts_to and end_dt is None:
             raise ValueError("ts_to")
         matched: list[dict[str, Any]] = []
-        cursor = 0
-        path = self.stream_path(stream)
-        if path.exists():
+        for _day, path in list_stream_files(self.dir, stream):
             with path.open("r", encoding="utf-8") as handle:
                 while True:
                     line = handle.readline()
@@ -199,7 +312,6 @@ class WatchStore:
                         break
                     if not line.endswith("\n"):
                         break
-                    cursor = handle.tell()
                     stripped = line.strip()
                     if not stripped:
                         continue
@@ -233,18 +345,16 @@ class WatchStore:
             "page": page,
             "page_size": page_size,
             "pages": pages,
-            "cursor": cursor,
+            "cursor": self._end_cursor(stream),
         }
 
     def record_count(self, stream: str) -> int:
-        path = self.stream_path(stream)
-        if not path.exists():
-            return 0
         count = 0
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    count += 1
+        for _day, path in list_stream_files(self.dir, stream):
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        count += 1
         return count
 
     def wait(

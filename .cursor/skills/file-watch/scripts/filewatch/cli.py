@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import sys
 import time
@@ -21,6 +20,7 @@ from filewatch.config import (
 from filewatch.models import EVENT_TYPES, STREAMS, FileEvent
 from filewatch.paths import sanitize_id, slug_id
 from filewatch.process import pid_alive
+from filewatch.rotate import install_daemon_logging
 from filewatch.rules import RuleEngine
 from filewatch.runtime import WatchRuntime, new_id, utc_now
 from filewatch.service import (
@@ -80,7 +80,7 @@ rules:
   #         prompt: |
   #           工作区是监听根目录。对 docs 下所有 .md 按参考格式重写。
   #           本次触发：{{type}} {{path}}
-  #         timeout_seconds: 600
+  #         timeout_seconds: 1800
   #         max_steps: 24
   #         # dingtalk: true   # 完成后立刻推送最后一轮回复；省略则沿用上面 notify 的渠道
   # 高级：外部 command / cursor_sdk
@@ -93,7 +93,7 @@ rules:
   #         runner: command
   #         command: ["python", "scripts/echo_agent.py"]
   #         prompt: "新建文件：{{path}}"
-  #         timeout_seconds: 600
+  #         timeout_seconds: 1800
 """
 
 
@@ -170,11 +170,9 @@ def cmd_start(ns: argparse.Namespace) -> int:
 
 
 def cmd_run(ns: argparse.Namespace) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
     store = _store(ns.id)
+    store.ensure()
+    install_daemon_logging(store.dir)
     if ns.config:
         config = load_config(ns.config)
     else:

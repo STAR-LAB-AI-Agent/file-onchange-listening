@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from filewatch.linediff import put_line_changes
+from filewatch.rotate import stream_file
 from filewatch.store import WatchStore
 
 
@@ -194,3 +197,62 @@ def test_query_records_rejects_bad_time(tmp_path) -> None:
         raise AssertionError("expected ValueError")
     except ValueError as exc:
         assert str(exc) == "ts_from"
+
+
+CST = timezone(timedelta(hours=8))
+
+
+def test_append_writes_dated_file(tmp_path) -> None:
+    now = datetime(2026, 9, 18, 15, 0, tzinfo=CST)
+    store = WatchStore("demo", root=tmp_path, clock=lambda: now)
+    store.append("events", {"id": "a"})
+    dated = stream_file(store.dir, "events", now.date())
+    assert dated.exists()
+    assert not (store.dir / "events.jsonl").exists()
+    assert '"id": "a"' in dated.read_text(encoding="utf-8")
+
+
+def test_read_since_crosses_midnight(tmp_path) -> None:
+    current = {"now": datetime(2026, 9, 18, 23, 0, tzinfo=CST)}
+    store = WatchStore("demo", root=tmp_path, clock=lambda: current["now"])
+    store.append("events", {"id": "old"})
+    items, cursor, _ = store.wait("events", 0, timeout=0.1, limit=10)
+    assert [item["id"] for item in items] == ["old"]
+    current["now"] = datetime(2026, 9, 19, 1, 0, tzinfo=CST)
+    store.append("events", {"id": "new"})
+    more, _ = store.read_since("events", cursor)
+    assert [item["id"] for item in more] == ["new"]
+    all_items, _ = store.read_since("events", 0)
+    assert [item["id"] for item in all_items] == ["old", "new"]
+
+
+def test_prune_rotated_drops_old_days(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_LOG_KEEP_DAYS", "2")
+    current = {"now": datetime(2026, 9, 1, 10, 0, tzinfo=CST)}
+    store = WatchStore("demo", root=tmp_path, clock=lambda: current["now"])
+    store.append("events", {"id": "ancient"})
+    put_line_changes(store.line_changes_path, "ancient", {"kind": "text", "added": 1, "removed": 0})
+    current["now"] = datetime(2026, 9, 19, 10, 0, tzinfo=CST)
+    store.append("events", {"id": "today"})
+    put_line_changes(store.line_changes_path, "today", {"kind": "text", "added": 2, "removed": 0})
+    store.prune_rotated()
+    ids = [item["id"] for item in store.read_since("events", 0)[0]]
+    assert ids == ["today"]
+    sidecar = store.line_changes_path.read_text(encoding="utf-8")
+    assert "ancient" not in sidecar
+    assert "today" in sidecar
+
+
+def test_migrate_legacy_events_and_cursor(tmp_path) -> None:
+    store = WatchStore("demo", root=tmp_path)
+    store.dir.mkdir(parents=True)
+    legacy = store.dir / "events.jsonl"
+    line = '{"id":"legacy"}\n'
+    legacy.write_text(line, encoding="utf-8")
+    store.write_cursors({"events": len(line), "jobs": 0})
+    store.ensure()
+    assert not legacy.exists()
+    leftover, _ = store.read_since("events", store.read_cursors()["events"])
+    assert leftover == []
+    items, _ = store.read_since("events", 0)
+    assert [item["id"] for item in items] == ["legacy"]

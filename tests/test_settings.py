@@ -225,6 +225,7 @@ def test_watch_timing_defaults_and_save(tmp_path: Path, monkeypatch) -> None:
     assert public["watch"]["debounce_ms"] == 400
     assert public["watch"]["line_diff_quiet_ms"] == 30_000
     assert public["watch"]["line_diff_max_bytes"] == 256 * 1024
+    assert public["logs"]["keep_days"] == 14
     timing = load_watch_timing()
     assert timing.debounce_ms == 400
     assert timing.line_diff_quiet_ms == 30_000
@@ -251,6 +252,29 @@ def test_watch_timing_rejects_negative(tmp_path: Path, monkeypatch) -> None:
     assert result["ok"] is False
     result = save_settings({"watch": {"line_diff_max_bytes": 0}})
     assert result["ok"] is False
+
+
+def test_log_keep_days_save_and_persist(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FILEWATCH_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("FILEWATCH_LLM_API_KEY", raising=False)
+    monkeypatch.delenv("FILEWATCH_LOG_KEEP_DAYS", raising=False)
+    from filewatch.rotate import keep_days
+
+    public = public_settings()
+    assert public["logs"]["keep_days"] == 14
+    result = save_settings({"logs": {"keep_days": 7}})
+    assert result["ok"] is True
+    assert result["logs"]["keep_days"] == 7
+    assert keep_days() == 7
+    save_settings({"llm": {"model": "kept", "base_url": "https://api.example/v1"}})
+    assert public_settings()["logs"]["keep_days"] == 7
+    assert keep_days() == 7
+    rejected = save_settings({"logs": {"keep_days": 0}})
+    assert rejected["ok"] is False
+    rejected = save_settings({"logs": {"keep_days": 366}})
+    assert rejected["ok"] is False
+    monkeypatch.setenv("FILEWATCH_LOG_KEEP_DAYS", "3")
+    assert keep_days() == 7
 
 
 def test_save_and_keep_wire_api(tmp_path: Path, monkeypatch) -> None:

@@ -180,7 +180,9 @@ def _parse_interval(raw: Any, *, field: str) -> tuple[float | None, str | None]:
     return value, None
 
 
-def _parse_int(raw: Any, *, field: str, default: int, min_value: int = 0) -> tuple[int | None, str | None]:
+def _parse_int(
+    raw: Any, *, field: str, default: int, min_value: int = 0, max_value: int | None = None
+) -> tuple[int | None, str | None]:
     if raw is None or raw == "":
         return default, None
     try:
@@ -191,6 +193,8 @@ def _parse_int(raw: Any, *, field: str, default: int, min_value: int = 0) -> tup
         return None, f"{field} 必须是整数"
     if value < min_value:
         return None, f"{field} 必须 >= {min_value}"
+    if max_value is not None and value > max_value:
+        return None, f"{field} 必须 <= {max_value}"
     return value, None
 
 
@@ -224,6 +228,31 @@ def load_watch_timing() -> WatchTiming:
         line_diff_quiet_ms=stored["line_diff_quiet_ms"],
         line_diff_max_bytes=stored["line_diff_max_bytes"],
     )
+
+
+def stored_log_keep_days() -> int | None:
+    stored = _logs_store_from_file(_read_file())
+    if stored is None:
+        return None
+    return int(stored["keep_days"])
+
+
+def _logs_store_from_file(stored: dict[str, Any]) -> dict[str, Any] | None:
+    raw = stored.get("logs") if isinstance(stored.get("logs"), dict) else None
+    if not isinstance(raw, dict) or "keep_days" not in raw:
+        return None
+    from filewatch.rotate import DEFAULT_KEEP_DAYS, MAX_KEEP_DAYS, clamp_keep_days
+
+    value, err = _parse_int(
+        raw.get("keep_days"),
+        field="keep_days",
+        default=DEFAULT_KEEP_DAYS,
+        min_value=1,
+        max_value=MAX_KEEP_DAYS,
+    )
+    if value is None or err:
+        return {"keep_days": clamp_keep_days(raw.get("keep_days"))}
+    return {"keep_days": value}
 
 
 def load_dingtalk_channels() -> tuple[DingTalkChannel, ...]:
@@ -315,6 +344,8 @@ def _public_channels() -> list[dict[str, Any]]:
 
 
 def public_settings() -> dict[str, Any]:
+    from filewatch.rotate import keep_days
+
     cfg = load_llm_config()
     timing = load_watch_timing()
     return {
@@ -332,6 +363,7 @@ def public_settings() -> dict[str, Any]:
             "line_diff_quiet_ms": timing.line_diff_quiet_ms,
             "line_diff_max_bytes": timing.line_diff_max_bytes,
         },
+        "logs": {"keep_days": keep_days()},
     }
 
 
@@ -474,15 +506,36 @@ def _merge_watch(raw: Any, stored: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_logs(raw: Any, stored: dict[str, Any]) -> dict[str, Any]:
+    from filewatch.rotate import DEFAULT_KEEP_DAYS, MAX_KEEP_DAYS
+
+    current = _logs_store_from_file(stored) or {"keep_days": DEFAULT_KEEP_DAYS}
+    if raw is None:
+        return {"ok": True, "logs": current}
+    if not isinstance(raw, dict):
+        return {"ok": False, "error": "bad_request", "message": "logs 必须是对象"}
+    days, days_err = _parse_int(
+        raw.get("keep_days", current["keep_days"]),
+        field="日志保留天数",
+        default=current["keep_days"],
+        min_value=1,
+        max_value=MAX_KEEP_DAYS,
+    )
+    if days_err:
+        return {"ok": False, "error": "bad_request", "message": days_err}
+    return {"ok": True, "logs": {"keep_days": days if days is not None else DEFAULT_KEEP_DAYS}}
+
+
 def save_settings(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"ok": False, "error": "bad_request", "message": "请求体必须是对象"}
     has_llm_key = isinstance(data.get("llm"), dict)
     has_ding_key = "dingtalk" in data
     has_watch_key = "watch" in data
+    has_logs_key = "logs" in data
     looks_like_llm = any(key in data for key in ("base_url", "model", "api_key", "clear_api_key", "wire_api"))
-    if not has_llm_key and not has_ding_key and not has_watch_key and not looks_like_llm:
-        return {"ok": False, "error": "bad_request", "message": "请求体必须包含 llm、dingtalk 或 watch"}
+    if not has_llm_key and not has_ding_key and not has_watch_key and not has_logs_key and not looks_like_llm:
+        return {"ok": False, "error": "bad_request", "message": "请求体必须包含 llm、dingtalk、watch 或 logs"}
 
     stored = _read_file()
     if has_llm_key or looks_like_llm:
@@ -510,5 +563,16 @@ def save_settings(data: dict[str, Any]) -> dict[str, Any]:
     else:
         watch_store = _watch_store_from_file(stored)
 
-    _atomic_write(settings_path(), {"llm": llm_store, "dingtalk": ding_store, "watch": watch_store})
+    payload: dict[str, Any] = {"llm": llm_store, "dingtalk": ding_store, "watch": watch_store}
+    if has_logs_key:
+        merged_logs = _merge_logs(data.get("logs"), stored)
+        if not merged_logs.get("ok"):
+            return merged_logs
+        payload["logs"] = merged_logs["logs"]
+    else:
+        existing_logs = _logs_store_from_file(stored)
+        if existing_logs is not None:
+            payload["logs"] = existing_logs
+
+    _atomic_write(settings_path(), payload)
     return {**public_settings(), "message": "设置已保存"}
